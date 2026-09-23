@@ -1,0 +1,15 @@
+[project]
+name = "bjvi-handoff"
+version = "1.0.0"
+description = "Blessed Journey VI multi-AI job handoff and notification layer"
+requires-python = ">=3.10"
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
