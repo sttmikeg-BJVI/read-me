@@ -2,3 +2,5 @@
 __pycache__/
 *.db
 .pytest_cache/
+*.sqlite3
+conference-notifications.jsonl
