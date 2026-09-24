@@ -248,6 +248,10 @@ class ConferenceStore:
     def job_view(self, job_id: str) -> JobView:
         row = self.job_row(job_id)
         attempt = self.active_attempt(job_id)
+        # The session stays visible after the attempt closes: Michael still
+        # needs the link to the work on a job that is verified or rejected.
+        attempts = self.attempts(job_id)
+        last = attempts[-1] if attempts else None
         depends_on = tuple(json.loads(row["depends_on"]))
         _, unmet = dependency_gate({"depends_on": depends_on}, self.job_states())
         return JobView(
@@ -257,7 +261,7 @@ class ConferenceStore:
             workstream=row["workstream"],
             priority=row["priority"],
             assigned_worker=row["assigned_worker"],
-            claim_session_url=attempt["session_url"] if attempt else None,
+            claim_session_url=last["session_url"] if last else None,
             lease_expires_at=attempt["lease_expires_at"] if attempt else None,
             blocker=row["blocker"],
             michael_only_gate=bool(row["michael_only_gate"]),
@@ -432,6 +436,15 @@ class ConferenceStore:
     def record_blocked(self, job_id: str, fence_token: str, blocker: str, now: float) -> None:
         attempt = self._require_current_fence(job_id, fence_token)
         self._close_attempt(job_id, int(attempt["attempt_no"]), "blocked", now)
+        self._set_job(job_id, state=STATE_BLOCKED_HUMAN, blocker=blocker, now=now)
+        self._conn.commit()
+
+    def block(self, job_id: str, blocker: str, now: float) -> None:
+        """Escalate a job to Michael with or without an attempt in flight."""
+        attempt = self.active_attempt(job_id)
+        if attempt is not None:
+            self.record_blocked(job_id, str(attempt["fence_token"]), blocker, now)
+            return
         self._set_job(job_id, state=STATE_BLOCKED_HUMAN, blocker=blocker, now=now)
         self._conn.commit()
 
