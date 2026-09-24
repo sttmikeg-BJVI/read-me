@@ -12,9 +12,11 @@ queries rather than by test doubles.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
-from conference_store import ConferenceStore, StoreRejection, connect_sqlite
+from conference_store import POSTGRES, ConferenceStore, StoreRejection, connect_sqlite
 from conference_verification import CheckOutcome, PASSED, Verdict, verify_receipt
 from jarvis_contract import (
     STATE_BLOCKED_HUMAN,
@@ -70,8 +72,29 @@ def receipt_for(job_id, fence_token, *, valid=True, outcome="returned_complete",
     }
 
 
-@pytest.fixture()
-def store():
+# Set CONFERENCE_TEST_DSN to run the same acceptance against a real Postgres
+# (a local container, or Neon once a DSN exists). Without it the Postgres
+# parameter is skipped rather than silently passing on SQLite alone.
+POSTGRES_DSN = os.environ.get("CONFERENCE_TEST_DSN")
+
+
+def _postgres_store():
+    psycopg = pytest.importorskip("psycopg")
+    connection = psycopg.connect(POSTGRES_DSN)
+    with connection.cursor() as cursor:
+        cursor.execute("DROP TABLE IF EXISTS receipts, attempts, jobs")
+    connection.commit()
+    store = ConferenceStore(connection, POSTGRES)
+    store.migrate()
+    return store
+
+
+@pytest.fixture(params=["sqlite", "postgres"])
+def store(request):
+    if request.param == "postgres":
+        if not POSTGRES_DSN:
+            pytest.skip("CONFERENCE_TEST_DSN is not set; no live Postgres to verify against")
+        return _postgres_store()
     store = ConferenceStore(connect_sqlite())
     store.migrate()
     return store
@@ -252,6 +275,27 @@ def test_state_survives_restart_and_reconnect(tmp_path):
     again = ConferenceStore(connect_sqlite(db))
     assert again.job_view(job_id).state == STATE_VERIFIED
     assert surface_status(again.job_view(job_id)) == SURFACE_DONE
+
+
+@pytest.mark.skipif(not POSTGRES_DSN, reason="CONFERENCE_TEST_DSN is not set")
+def test_state_survives_reconnect_on_postgres():
+    import psycopg
+
+    store = _postgres_store()
+    job_id = store.submit_intent(submission_from_payload(payload()), now=T0)
+    claim = store.claim(job_id, "devin", now=T0, lease_seconds=600)
+    receipt = receipt_for(job_id, claim.fence_token)
+    store.record_return(receipt, now=T0 + 10)
+
+    reconnected = ConferenceStore(psycopg.connect(POSTGRES_DSN), POSTGRES)
+    view = reconnected.job_view(job_id)
+    assert view.state == STATE_RETURNED_UNVERIFIED
+    assert view.lease_expires_at == T0 + 600
+    assert reconnected.record_return(receipt, now=T0 + 30).stored is False
+
+    reconnected.apply_verdict(verify_receipt(receipt, OkChecker()), now=T0 + 40)
+    again = ConferenceStore(psycopg.connect(POSTGRES_DSN), POSTGRES)
+    assert again.job_view(job_id).state == STATE_VERIFIED
 
 
 def test_verified_job_cannot_be_reclaimed(store):
