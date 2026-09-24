@@ -17,7 +17,7 @@ import os
 import pytest
 
 from conference_store import POSTGRES, ConferenceStore, StoreRejection, connect_sqlite
-from conference_verification import CheckOutcome, PASSED, Verdict, verify_receipt
+from conference_verification import PASSED, CheckOutcome, Verdict, verify_receipt
 from jarvis_contract import (
     STATE_BLOCKED_HUMAN,
     STATE_QUEUED,

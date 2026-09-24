@@ -1,12 +1,12 @@
 from conference_verification import (
-    Check,
-    CheckOutcome,
     FAILED,
     NEEDS_HUMAN,
     NOT_RUN,
     PASSED,
     REJECTED,
     VERIFIED,
+    Check,
+    CheckOutcome,
     verify_receipt,
 )
 

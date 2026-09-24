@@ -11,7 +11,7 @@ any divergence is in the transport, not in the logic.
 
 import json
 
-from conference_verification import CheckOutcome, PASSED, VERIFIED, verify_receipt
+from conference_verification import PASSED, VERIFIED, CheckOutcome, verify_receipt
 from devin_worker_adapter import DevinWorkerAdapter, Job, build_receipt
 from jarvis_contract import (
     SURFACE_DONE,

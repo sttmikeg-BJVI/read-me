@@ -1,10 +1,10 @@
 import json
 
 from devin_worker_adapter import (
+    WORKER_RETURN_SCHEMA,
     DevinApiError,
     DevinWorkerAdapter,
     Job,
-    WORKER_RETURN_SCHEMA,
     build_receipt,
 )
 

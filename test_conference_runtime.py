@@ -9,12 +9,13 @@ live run replaces two injected objects and nothing else.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
 
 from conference_runtime import CollectingNotifier, ConferenceRuntime
 from conference_store import ConferenceStore, connect_sqlite
-from conference_verification import CheckOutcome, PASSED
+from conference_verification import PASSED, CheckOutcome
 from devin_worker_adapter import DevinWorkerAdapter
 from jarvis_contract import (
     STATE_BLOCKED_HUMAN,
@@ -26,7 +27,6 @@ from jarvis_contract import (
     surface_status,
 )
 from worker_provider import CLAUDE, CODEX, DEVIN, ProviderRegistry
-from dataclasses import replace
 
 T0 = 5_000.0
 

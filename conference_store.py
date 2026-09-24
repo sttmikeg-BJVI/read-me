@@ -47,7 +47,7 @@ from jarvis_contract import (
     JobView,
 )
 from receipt_ledger import return_digest
-from reroute_policy import Attempt, Decision, dependency_gate, decide, next_fence_token
+from reroute_policy import Attempt, Decision, decide, dependency_gate, next_fence_token
 
 SQLITE = "sqlite"
 POSTGRES = "postgres"
@@ -227,6 +227,9 @@ class ConferenceStore:
         if row is None:
             raise StoreRejection(f"unknown job: {job_id}")
         return row
+
+    def jobs(self) -> list[dict[str, Any]]:
+        return self._fetchall("SELECT * FROM jobs ORDER BY created_at, job_id")
 
     def job_states(self) -> dict[str, str]:
         return {row["job_id"]: row["state"] for row in self._fetchall("SELECT job_id, state FROM jobs")}

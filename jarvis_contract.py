@@ -15,8 +15,8 @@ No job storage lives here. This is a contract, not a second job database.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any, Mapping
 
 # --- what Michael/Jarvis is allowed to say -----------------------------------
 
