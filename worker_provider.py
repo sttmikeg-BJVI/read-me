@@ -142,6 +142,26 @@ CLAUDE = ProviderDescriptor(
 )
 
 
+def devin_relay_descriptor(spool_ready: bool) -> ProviderDescriptor:
+    """Devin reached through the filesystem spool instead of the HTTP API.
+
+    Same executor as `DEVIN`, different transport: the relay carries the
+    dispatch envelope to a real Devin session and copies the worker's return
+    back. Eligible only when a spool directory is actually present, so a
+    missing spool blocks dispatch rather than silently faking one.
+    """
+    return ProviderDescriptor(
+        name="devin_relay",
+        capabilities=frozenset(
+            {CAP_CODE, CAP_GITHUB_PR, CAP_SHELL, CAP_LONG_RUNNING, CAP_STRUCTURED_RETURN}
+        ),
+        return_mode="poll",
+        credentials_available=spool_ready,
+        live_verified=False,
+        notes="Transport is a file spool relayed by an authorized operator; not a webhook.",
+    )
+
+
 class ProviderRegistry:
     """Lookup of declared providers. Holds no jobs and no state."""
 

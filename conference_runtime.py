@@ -79,6 +79,8 @@ class ConferenceRuntime:
         notifier: Notifier | None = None,
         clock: Callable[[], float] = None,  # type: ignore[assignment]
         lease_seconds: float = 900.0,
+        poll_interval: float = 0.0,
+        wait_timeout: float | None = None,
     ) -> None:
         import time
 
@@ -88,6 +90,8 @@ class ConferenceRuntime:
         self.notifier: Notifier = notifier or CollectingNotifier()
         self.clock = clock or time.time
         self.lease_seconds = lease_seconds
+        self.poll_interval = poll_interval
+        self.wait_timeout = wait_timeout
 
     # --- one job, one step ------------------------------------------------
 
@@ -155,7 +159,12 @@ class ConferenceRuntime:
         if session_id:
             self.store.attach_session(job_id, claim.fence_token, session_id, session_url or "")
 
-        worker_return = adapter.wait_for_return(provider_claim, poll_interval=0.0)
+        worker_return = adapter.wait_for_return(
+            provider_claim,
+            lease_seconds=self.lease_seconds,
+            poll_interval=self.poll_interval,
+            timeout=self.wait_timeout,
+        )
         received_at = self.clock()
 
         if getattr(worker_return, "needs_human", False):

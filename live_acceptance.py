@@ -42,7 +42,8 @@ from jarvis import Jarvis
 from jarvis_contract import surface_status
 from live_evidence import LiveEvidenceChecker
 from notifications import AuditLogNotifier, WebhookNotifier, notifier_from_env
-from worker_provider import DEVIN, ProviderRegistry
+from spool_relay_provider import SpoolRelayProvider
+from worker_provider import DEVIN, ProviderRegistry, devin_relay_descriptor
 
 LIVE = "LIVE"
 SIMULATED = "SIMULATED"
@@ -162,6 +163,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--db", default="conference-acceptance.sqlite3")
     parser.add_argument("--evidence-url", default="https://example.com")
     parser.add_argument("--simulate-worker", action="store_true")
+    parser.add_argument(
+        "--relay-spool",
+        help="dispatch through a filesystem spool relayed to a real worker session",
+    )
+    parser.add_argument("--wait-timeout", type=float, default=3600.0)
+    parser.add_argument("--poll-interval", type=float, default=5.0)
+    parser.add_argument("--objective", default=INSTRUCTION)
     parser.add_argument("--inspect", action="store_true")
     args = parser.parse_args(argv)
 
@@ -202,9 +210,24 @@ def main(argv: list[str] | None = None) -> int:
     # 4. worker transport --------------------------------------------------
     api_key = os.environ.get("DEVIN_API_KEY")
     registry = ProviderRegistry()
-    if api_key:
+    poll_interval = 0.0
+    wait_timeout: float | None = None
+    if args.relay_spool:
+        spool = Path(args.relay_spool).resolve()
+        registry = ProviderRegistry([devin_relay_descriptor(spool_ready=True)])
+        registry.register_adapter("devin_relay", SpoolRelayProvider(root=spool, worker="devin"))
+        poll_interval = args.poll_interval
+        wait_timeout = args.wait_timeout
+        say(
+            "worker transport",
+            LIVE,
+            f"file spool {spool}; a real worker session must write the return",
+        )
+    elif api_key:
         adapter = DevinWorkerAdapter(api_key=api_key)
-        registry = ProviderRegistry([DEVIN.__class__(**{**DEVIN.__dict__, "credentials_available": True})])
+        registry = ProviderRegistry(
+            [DEVIN.__class__(**{**DEVIN.__dict__, "credentials_available": True})]
+        )
         registry.register_adapter("devin", adapter)
         say("worker transport", LIVE, "DEVIN_API_KEY present; real Devin API")
     elif args.simulate_worker:
@@ -218,17 +241,28 @@ def main(argv: list[str] | None = None) -> int:
         say("worker transport", SIMULATED, "no DEVIN_API_KEY; replaying a canned worker return")
         fully_live = False
     else:
-        say("worker transport", BLOCKED, "no DEVIN_API_KEY and --simulate-worker not passed")
+        say(
+            "worker transport",
+            BLOCKED,
+            "no DEVIN_API_KEY, no --relay-spool, and --simulate-worker not passed",
+        )
         say("verdict", BLOCKED, "worker dispatch is the only stage without a credential")
         return 2
 
     # 5. Jarvis instruction -> canonical job -------------------------------
     jarvis = Jarvis(store)
-    reply = jarvis.instruct(INSTRUCTION, workstream="engineering")
+    reply = jarvis.instruct(args.objective, workstream="engineering")
     job_id = reply.job_id
     say("jarvis instruction", LIVE, f"{job_id}: {reply.text}")
 
-    runtime = ConferenceRuntime(store, registry, checker, notifier=notifier)
+    runtime = ConferenceRuntime(
+        store,
+        registry,
+        checker,
+        notifier=notifier,
+        poll_interval=poll_interval,
+        wait_timeout=wait_timeout,
+    )
 
     # 6. the chain ---------------------------------------------------------
     result = runtime.run(job_id, required_evidence_kinds=())
