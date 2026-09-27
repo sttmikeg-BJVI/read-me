@@ -174,3 +174,60 @@ def test_non_complete_outcomes_stay_unverified(tmp_path, outcome):
     result = provider.poll(claim)
     assert result.has_valid_return
     assert result.structured_output["outcome"] == outcome
+
+
+def test_runtime_records_the_session_the_worker_returned_with(tmp_path):
+    """The relay learns the session id after dispatch, so the canonical
+    attempt has to pick it up from the return rather than staying blank."""
+    from conference_runtime import ConferenceRuntime
+    from conference_store import ConferenceStore, connect_sqlite
+    from conference_verification import PASSED, CheckOutcome
+    from jarvis_contract import STATE_VERIFIED, submission_from_payload
+    from worker_provider import ProviderRegistry
+
+    class OkChecker:
+        def _ok(self, ref):
+            return CheckOutcome(PASSED)
+
+        check_pull_request = check_commit = check_file = check_url = check_command_output = _ok
+
+    store = ConferenceStore(connect_sqlite())
+    store.migrate()
+    job_id = store.submit_intent(
+        submission_from_payload(
+            {
+                "intent_id": "intent-relay",
+                "objective": "push a receipt commit",
+                "workstream": "conference",
+                "priority": "P0",
+                "capability_required": ["code"],
+                "expected_receipts": ["commit"],
+            }
+        ),
+        now=1000.0,
+        notify_on_complete=False,
+    )
+    fence = f"{job_id}:a0"
+
+    provider = SpoolRelayProvider(root=tmp_path)
+    registry = ProviderRegistry([devin_relay_descriptor(spool_ready=True)])
+    registry.register_adapter("devin_relay", provider)
+
+    output = good_output(fence)
+    output["job_id"] = job_id
+    output["evidence"] = [{"kind": "commit", "ref": "a" * 40}]
+    write_return(
+        tmp_path,
+        job_id,
+        fence,
+        output,
+        session_id="devin-real",
+        session_url="https://app.devin.ai/sessions/real",
+    )
+
+    runtime = ConferenceRuntime(store, registry, OkChecker(), clock=lambda: 1000.0)
+    result = runtime.run(job_id, required_evidence_kinds=("commit",))
+
+    assert result.state == STATE_VERIFIED
+    view = store.job_view(job_id)
+    assert view.claim_session_url == "https://app.devin.ai/sessions/real"

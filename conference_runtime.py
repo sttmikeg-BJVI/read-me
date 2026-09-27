@@ -167,6 +167,16 @@ class ConferenceRuntime:
         )
         received_at = self.clock()
 
+        returned_session = getattr(worker_return, "session_id", None)
+        if returned_session and returned_session != session_id:
+            raw = getattr(worker_return, "raw", None) or {}
+            self.store.attach_session(
+                job_id,
+                claim.fence_token,
+                returned_session,
+                str(raw.get("session_url") or session_url or ""),
+            )
+
         if getattr(worker_return, "needs_human", False):
             blocker = getattr(worker_return, "blocker", None) or "worker is blocked on human input"
             self.store.record_blocked(job_id, claim.fence_token, blocker, received_at)
