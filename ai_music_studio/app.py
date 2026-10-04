@@ -49,10 +49,10 @@ audio{width:100%;height:34px}.matches{font-size:11px;margin-top:6px}.ok{color:#8
 <section class="panel">
 <h2>Add Beat</h2>
 <form id="beatForm">
-<input name="title" placeholder="Beat title" required>
+<input name="title_prefix" placeholder="Optional title prefix">
 <input name="tags" placeholder="Tags: cinematic, street, romantic">
-<input type="file" name="file" accept="audio/*" required>
-<button>Upload + Analyze Beat</button>
+<input type="file" name="files" accept="audio/*" multiple required>
+<button>Upload + Analyze Beat(s)</button>
 </form>
 <div id="beatMsg" class="small"></div>
 </section>
@@ -99,7 +99,7 @@ async function postForm(url, form){
 }
 q("#beatForm").addEventListener("submit",async e=>{
   e.preventDefault(); q("#beatMsg").textContent="Analyzing...";
-  try{await postForm("/beats",e.target);q("#beatMsg").textContent="Beat added.";e.target.reset();await load();}
+  try{const out=await postForm("/beats/bulk",e.target);q("#beatMsg").textContent=out.added+" beat(s) added.";e.target.reset();await load();}
   catch(err){q("#beatMsg").textContent=err.message;}
 });
 q("#songForm").addEventListener("submit",async e=>{
@@ -121,7 +121,7 @@ async function showMatches(id){
   const data=await r.json();
   if(!r.ok){alert(data.detail||"Match failed");return;}
   const box=document.getElementById("m_"+id);
-  box.innerHTML=(data.matches||[]).slice(0,5).map(x=>"<div>"+x.score+" — "+esc(x.title)+"</div>").join("")||"No beats yet";
+  box.innerHTML=(data.matches||[]).slice(0,5).map(x=>"<div>"+x.score+" — "+esc(x.title)+" <button onclick=\"action('/songs/"+id+"/assign/"+x.beat_id+"')\" style='width:auto;padding:3px 6px'>Assign</button></div>").join("")||"No beats yet";
 }
 function esc(v){return String(v??"").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[m]));}
 function card(s){
@@ -182,6 +182,29 @@ async def add_beat(
     beats.append(beat)
     save_beats(beats)
     return {"beat": beat}
+
+@app.post("/beats/bulk")
+async def add_beats_bulk(
+    title_prefix: str = Form(""),
+    tags: str = Form(""),
+    files: list[UploadFile] = File(...),
+):
+    beats = load_beats()
+    added = []
+    tag_list = [x.strip() for x in tags.split(",") if x.strip()]
+    for file in files:
+        ext = _audio_ext(file.filename)
+        beat_id = uuid.uuid4().hex[:12]
+        source_title = Path(file.filename or beat_id).stem
+        title = f"{title_prefix.strip()} {source_title}".strip() if title_prefix.strip() else source_title
+        target = UPLOADS / f"beat_{beat_id}{ext}"
+        with target.open("wb") as out:
+            shutil.copyfileobj(file.file, out)
+        beat = analyze_beat(str(target), beat_id, title, tag_list)
+        beats.append(beat)
+        added.append(beat)
+    save_beats(beats)
+    return {"added": len(added), "beats": added}
 
 @app.get("/beats")
 def beats():
@@ -265,6 +288,25 @@ def auto_allocate(song_id: str):
         raise HTTPException(409, "No beats are available to allocate")
     save_songs(songs)
     return {"song": song, "assigned": best}
+
+@app.post("/songs/{song_id}/assign/{beat_id}")
+def assign_specific(song_id: str, beat_id: str):
+    songs = load_songs()
+    song = next((s for s in songs if s.id == song_id), None)
+    if not song:
+        raise HTTPException(404, "Song not found")
+    beats = load_beats()
+    beat = next((b for b in beats if b.id == beat_id), None)
+    if not beat:
+        raise HTTPException(404, "Beat not found")
+    ranked = suggest_matches(song, beats)
+    scored = next((r for r in ranked if r.beat_id == beat_id), None)
+    song.assigned_beat_id = beat.id
+    song.assigned_beat_title = beat.title
+    song.match_score = scored.score if scored else None
+    song.status = "ASSIGNED"
+    save_songs(songs)
+    return {"song": song, "assigned_beat": beat}
 
 @app.post("/songs/{song_id}/ready")
 def mark_ready(song_id: str):
