@@ -27,3 +27,22 @@ class MatchResult:
     title: str
     score: float
     reasons: List[str]
+
+@dataclass
+class SongRecord:
+    id: str
+    title: str
+    lyrics: str = ""
+    lane: str = "unassigned"
+    tags: List[str] = field(default_factory=list)
+    status: str = "INBOX"
+    audio_path: Optional[str] = None
+    duration: float = 0.0
+    estimated_bpm: float = 0.0
+    energy: float = 0.0
+    onset_density: float = 0.0
+    pause_ratio: float = 0.0
+    assigned_beat_id: Optional[str] = None
+    assigned_beat_title: Optional[str] = None
+    match_score: Optional[float] = None
+    notes: str = ""
