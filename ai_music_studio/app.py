@@ -70,11 +70,28 @@ audio{width:100%;height:34px}.matches{font-size:11px;margin-top:6px}.ok{color:#8
 <option value="cinematic">Cinematic</option>
 </select>
 <input name="tags" placeholder="Tags / mood / energy">
-<textarea name="lyrics" placeholder="Paste lyrics or song notes"></textarea>
+<textarea id="lyricsBox" name="lyrics" placeholder="Paste lyrics or song notes"></textarea>
+<input id="lyricTextFile" type="file" accept=".txt,.md,text/plain">
 <textarea name="notes" placeholder="Production notes"></textarea>
 <input type="file" name="audio" accept="audio/*">
 <button>Save Song + Analyze Audio</button>
 </form>
+<hr style="border-color:#333;margin:14px 0">
+<h3>Bulk lyric import</h3>
+<form id="bulkLyricsForm">
+<select name="lane">
+<option value="unassigned">Unassigned</option>
+<option value="club-women">Club — Women</option>
+<option value="romantic-women">Romantic — Women</option>
+<option value="club-open">Club — Men / Both (Jack)</option>
+<option value="street">Street</option>
+<option value="cinematic">Cinematic</option>
+</select>
+<input name="tags" placeholder="Shared tags for imported lyrics">
+<input type="file" name="files" accept=".txt,.md,text/plain" multiple required>
+<button>Import Lyric Files</button>
+</form>
+<div id="bulkLyricsMsg" class="small"></div>
 <div id="songMsg" class="small"></div>
 </section>
 </div>
@@ -101,6 +118,18 @@ q("#beatForm").addEventListener("submit",async e=>{
   e.preventDefault(); q("#beatMsg").textContent="Analyzing...";
   try{const out=await postForm("/beats/bulk",e.target);q("#beatMsg").textContent=out.added+" beat(s) added.";e.target.reset();await load();}
   catch(err){q("#beatMsg").textContent=err.message;}
+});
+q("#lyricTextFile").addEventListener("change",async e=>{
+  const file=e.target.files[0];
+  if(file) q("#lyricsBox").value=await file.text();
+});
+q("#bulkLyricsForm").addEventListener("submit",async e=>{
+  e.preventDefault(); q("#bulkLyricsMsg").textContent="Importing...";
+  try{
+    const out=await postForm("/songs/bulk-lyrics",e.target);
+    q("#bulkLyricsMsg").textContent=out.added+" lyric file(s) imported.";
+    e.target.reset(); await load();
+  }catch(err){q("#bulkLyricsMsg").textContent=err.message;}
 });
 q("#songForm").addEventListener("submit",async e=>{
   e.preventDefault(); q("#songMsg").textContent="Saving...";
@@ -253,6 +282,41 @@ async def add_song(
     songs.append(song)
     save_songs(songs)
     return {"song": song}
+
+@app.post("/songs/bulk-lyrics")
+async def add_songs_from_lyrics(
+    lane: str = Form("unassigned"),
+    tags: str = Form(""),
+    files: list[UploadFile] = File(...),
+):
+    from .models import SongRecord
+    songs = load_songs()
+    added = []
+    tag_list = [x.strip() for x in tags.split(",") if x.strip()]
+    for file in files:
+        filename = file.filename or "Untitled"
+        ext = Path(filename).suffix.lower()
+        if ext not in {".txt", ".md"}:
+            raise HTTPException(400, f"Unsupported lyric file: {filename}")
+        raw = await file.read()
+        try:
+            lyrics = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            lyrics = raw.decode("utf-8", errors="replace")
+        title = Path(filename).stem
+        song = SongRecord(
+            id=uuid.uuid4().hex[:12],
+            title=title,
+            lyrics=lyrics,
+            lane=normalize_lane(lane),
+            tags=list(tag_list),
+            status="INBOX",
+            notes=f"Imported from {filename}",
+        )
+        songs.append(song)
+        added.append(song)
+    save_songs(songs)
+    return {"added": len(added), "songs": added}
 
 @app.get("/songs")
 def songs():
