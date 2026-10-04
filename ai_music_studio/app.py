@@ -5,26 +5,166 @@ from pathlib import Path
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
 from .analyzer import analyze_beat, analyze_performance
-from .matcher import rank_beats
-from .store import ensure_dirs, load_beats, save_beats, UPLOADS
+from .organizer import (
+    PRODUCTION_TEMPLATE,
+    assign_best,
+    grid_payload,
+    normalize_lane,
+    normalize_status,
+    suggest_matches,
+)
+from .store import ensure_dirs, load_beats, load_songs, save_beats, save_songs, UPLOADS
 
 app = FastAPI(title="AI Music Production Studio")
 ensure_dirs()
 
-INDEX = """
-<!doctype html><html><head><meta charset='utf-8'><title>AI Music Production Studio</title>
-<style>body{font-family:Arial,sans-serif;max-width:900px;margin:40px auto;padding:0 18px}section{border:1px solid #ccc;padding:18px;margin:16px 0;border-radius:10px}input,textarea,button{margin:6px 0;padding:8px;width:100%;box-sizing:border-box}.row{display:grid;grid-template-columns:1fr 1fr;gap:12px}audio{width:100%}</style>
-</head><body>
+INDEX = r"""
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI Music Production Studio</title>
+<style>
+body{font-family:Arial,sans-serif;margin:0;background:#111;color:#eee}
+main{max-width:1400px;margin:auto;padding:20px}
+h1{margin:0 0 6px}.muted{color:#aaa}
+.panel{background:#1b1b1b;border:1px solid #333;border-radius:12px;padding:16px;margin:14px 0}
+.forms{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+input,textarea,select,button{width:100%;box-sizing:border-box;padding:9px;margin:5px 0;border-radius:7px;border:1px solid #444;background:#222;color:#eee}
+button{cursor:pointer;background:#333}.small{font-size:12px}.gridwrap{overflow-x:auto}
+table{border-collapse:separate;border-spacing:8px;min-width:1150px;width:100%}
+th{font-size:12px;color:#bbb;text-transform:uppercase}td{vertical-align:top;background:#171717;border:1px solid #333;border-radius:9px;padding:8px;min-width:190px}
+.lane{font-weight:bold;width:160px}.card{border:1px solid #444;background:#242424;border-radius:8px;padding:9px;margin:6px 0}
+.card strong{display:block}.meta{font-size:11px;color:#aaa;margin:4px 0}.actions{display:flex;gap:6px;flex-wrap:wrap}.actions button{width:auto;font-size:11px;padding:6px 8px}
+audio{width:100%;height:34px}.matches{font-size:11px;margin-top:6px}.ok{color:#8ed081}.err{color:#ff8b8b}
+@media(max-width:800px){.forms{grid-template-columns:1fr}}
+</style>
+</head>
+<body><main>
 <h1>AI Music Production Studio</h1>
-<section><h2>1. Add beat</h2><form action='/beats' method='post' enctype='multipart/form-data'><input name='title' placeholder='Beat title'><input name='tags' placeholder='Tags: cinematic,street,romantic'><input type='file' name='file' accept='audio/*'><button>Add + Analyze Beat</button></form></section>
-<section><h2>2. Match a delivery</h2><form action='/match' method='post' enctype='multipart/form-data'><textarea name='lyrics' placeholder='Paste lyrics here'></textarea><input name='tags' placeholder='Lane/tags'><input type='file' name='performance' accept='audio/*'><button>Analyze Delivery + Match</button></form></section>
-<section><a href='/beats'>View beat library (JSON)</a></section>
-</body></html>
+<div class="muted">Upload beats + songs, analyze them, match them, and place them on the production grid.</div>
+
+<div class="forms">
+<section class="panel">
+<h2>Add Beat</h2>
+<form id="beatForm">
+<input name="title" placeholder="Beat title" required>
+<input name="tags" placeholder="Tags: cinematic, street, romantic">
+<input type="file" name="file" accept="audio/*" required>
+<button>Upload + Analyze Beat</button>
+</form>
+<div id="beatMsg" class="small"></div>
+</section>
+
+<section class="panel">
+<h2>Add Song / Performance</h2>
+<form id="songForm">
+<input name="title" placeholder="Song title" required>
+<select name="lane">
+<option value="unassigned">Unassigned</option>
+<option value="club-women">Club — Women</option>
+<option value="romantic-women">Romantic — Women</option>
+<option value="club-open">Club — Men / Both (Jack)</option>
+<option value="street">Street</option>
+<option value="cinematic">Cinematic</option>
+</select>
+<input name="tags" placeholder="Tags / mood / energy">
+<textarea name="lyrics" placeholder="Paste lyrics or song notes"></textarea>
+<textarea name="notes" placeholder="Production notes"></textarea>
+<input type="file" name="audio" accept="audio/*">
+<button>Save Song + Analyze Audio</button>
+</form>
+<div id="songMsg" class="small"></div>
+</section>
+</div>
+
+<section class="panel">
+<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+<h2 style="margin-right:auto">Production Grid</h2>
+<input id="filter" style="max-width:280px" placeholder="Filter title, lane, status">
+<button id="refresh" style="width:auto">Refresh</button>
+</div>
+<div id="summary" class="small muted"></div>
+<div id="grid" class="gridwrap"></div>
+</section>
+
+<script>
+const q=s=>document.querySelector(s);
+async function postForm(url, form){
+  const r=await fetch(url,{method:"POST",body:new FormData(form)});
+  const data=await r.json();
+  if(!r.ok) throw new Error(data.detail||"Request failed");
+  return data;
+}
+q("#beatForm").addEventListener("submit",async e=>{
+  e.preventDefault(); q("#beatMsg").textContent="Analyzing...";
+  try{await postForm("/beats",e.target);q("#beatMsg").textContent="Beat added.";e.target.reset();await load();}
+  catch(err){q("#beatMsg").textContent=err.message;}
+});
+q("#songForm").addEventListener("submit",async e=>{
+  e.preventDefault(); q("#songMsg").textContent="Saving...";
+  try{await postForm("/songs",e.target);q("#songMsg").textContent="Song added.";e.target.reset();await load();}
+  catch(err){q("#songMsg").textContent=err.message;}
+});
+q("#refresh").addEventListener("click",load);
+q("#filter").addEventListener("input",load);
+
+async function action(url){
+  const r=await fetch(url,{method:"POST"});
+  const data=await r.json();
+  if(!r.ok){alert(data.detail||"Action failed");return;}
+  await load();
+}
+async function showMatches(id){
+  const r=await fetch("/songs/"+id+"/match",{method:"POST"});
+  const data=await r.json();
+  if(!r.ok){alert(data.detail||"Match failed");return;}
+  const box=document.getElementById("m_"+id);
+  box.innerHTML=(data.matches||[]).slice(0,5).map(x=>"<div>"+x.score+" — "+esc(x.title)+"</div>").join("")||"No beats yet";
+}
+function esc(v){return String(v??"").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[m]));}
+function card(s){
+  const audio=s.audio_path?'<audio controls src="/songs/'+s.id+'/audio"></audio>':"";
+  const beat=s.assigned_beat_title?'<div class="meta">Beat: '+esc(s.assigned_beat_title)+' · '+(s.match_score??"")+"%</div>":"";
+  return '<div class="card"><strong>'+esc(s.title)+'</strong>'+
+    '<div class="meta">'+esc(s.lane)+' · '+esc(s.status)+(s.estimated_bpm?(" · "+s.estimated_bpm.toFixed(1)+" BPM"):"")+'</div>'+
+    beat+audio+
+    '<div class="actions"><button onclick="showMatches(\''+s.id+'\')">Match</button><button onclick="action(\'/songs/'+s.id+'/auto-allocate\')">Auto allocate</button><button onclick="action(\'/songs/'+s.id+'/ready\')">Mark ready</button></div>'+
+    '<div class="matches" id="m_'+s.id+'"></div></div>';
+}
+async function load(){
+  const r=await fetch("/api/state"); const data=await r.json();
+  const f=q("#filter").value.trim().toLowerCase();
+  const songs=(data.songs||[]).filter(s=>!f||[s.title,s.lane,s.status,s.assigned_beat_title].join(" ").toLowerCase().includes(f));
+  q("#summary").textContent=songs.length+" songs · "+(data.beats||[]).length+" beats";
+  const columns=data.template.columns;
+  const lanes=data.template.lanes;
+  let html="<table><thead><tr><th>Lane</th>"+columns.map(c=>"<th>"+c+"</th>").join("")+"</tr></thead><tbody>";
+  for(const lane of lanes){
+    html+="<tr><td class='lane'>"+esc(lane.label)+"</td>";
+    for(const status of columns){
+      const cell=songs.filter(s=>s.lane===lane.id&&s.status===status);
+      html+="<td>"+cell.map(card).join("")+"</td>";
+    }
+    html+="</tr>";
+  }
+  html+="</tbody></table>"; q("#grid").innerHTML=html;
+}
+load();
+</script>
+</main></body></html>
 """
 
 @app.get("/", response_class=HTMLResponse)
 def home():
     return INDEX
+
+def _audio_ext(filename: str | None):
+    ext = Path(filename or "").suffix.lower()
+    if ext not in {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}:
+        raise HTTPException(400, "Unsupported audio type")
+    return ext
 
 @app.post("/beats")
 async def add_beat(
@@ -32,11 +172,9 @@ async def add_beat(
     tags: str = Form(""),
     file: UploadFile = File(...),
 ):
-    ext = Path(file.filename or "").suffix.lower()
-    if ext not in {".mp3",".wav",".m4a",".aac",".flac",".ogg"}:
-        raise HTTPException(400, "Unsupported audio type")
+    ext = _audio_ext(file.filename)
     beat_id = uuid.uuid4().hex[:12]
-    target = UPLOADS / f"{beat_id}{ext}"
+    target = UPLOADS / f"beat_{beat_id}{ext}"
     with target.open("wb") as out:
         shutil.copyfileobj(file.file, out)
     beat = analyze_beat(str(target), beat_id, title, [x.strip() for x in tags.split(",") if x.strip()])
@@ -56,26 +194,95 @@ def beat_audio(beat_id: str):
         raise HTTPException(404, "Beat not found")
     return FileResponse(beat.path)
 
-@app.post("/match")
-async def match(
-    lyrics: str = Form(""),
+@app.post("/songs")
+async def add_song(
+    title: str = Form(...),
+    lane: str = Form("unassigned"),
     tags: str = Form(""),
-    performance: UploadFile | None = File(None),
+    lyrics: str = Form(""),
+    notes: str = Form(""),
+    audio: UploadFile | None = File(None),
 ):
-    perf_features = None
-    if performance and performance.filename:
-        ext = Path(performance.filename).suffix.lower() or ".wav"
-        target = UPLOADS / f"performance_{uuid.uuid4().hex[:12]}{ext}"
-        with target.open("wb") as out:
-            shutil.copyfileobj(performance.file, out)
-        perf_features = analyze_performance(str(target))
-    results = rank_beats(
-        load_beats(),
-        performance=perf_features,
-        lyric_tags=[x.strip() for x in tags.split(",") if x.strip()],
+    from .models import SongRecord
+    song_id = uuid.uuid4().hex[:12]
+    song = SongRecord(
+        id=song_id,
+        title=title.strip(),
+        lyrics=lyrics,
+        lane=normalize_lane(lane),
+        tags=[x.strip() for x in tags.split(",") if x.strip()],
+        notes=notes,
     )
+    if audio and audio.filename:
+        ext = _audio_ext(audio.filename)
+        target = UPLOADS / f"song_{song_id}{ext}"
+        with target.open("wb") as out:
+            shutil.copyfileobj(audio.file, out)
+        perf = analyze_performance(str(target))
+        song.audio_path = str(target)
+        song.duration = perf.duration
+        song.estimated_bpm = perf.estimated_bpm
+        song.energy = perf.energy
+        song.onset_density = perf.onset_density
+        song.pause_ratio = perf.pause_ratio
+        song.status = "ANALYZED"
+    songs = load_songs()
+    songs.append(song)
+    save_songs(songs)
+    return {"song": song}
+
+@app.get("/songs")
+def songs():
+    return {"songs": load_songs()}
+
+@app.get("/songs/{song_id}/audio")
+def song_audio(song_id: str):
+    song = next((s for s in load_songs() if s.id == song_id), None)
+    if not song or not song.audio_path:
+        raise HTTPException(404, "Song audio not found")
+    return FileResponse(song.audio_path)
+
+@app.post("/songs/{song_id}/match")
+def match_song(song_id: str):
+    songs = load_songs()
+    song = next((s for s in songs if s.id == song_id), None)
+    if not song:
+        raise HTTPException(404, "Song not found")
+    matches = suggest_matches(song, load_beats())
+    if matches and song.status not in {"ASSIGNED", "READY"}:
+        song.status = "MATCHED"
+        save_songs(songs)
+    return {"song_id": song_id, "matches": matches[:10]}
+
+@app.post("/songs/{song_id}/auto-allocate")
+def auto_allocate(song_id: str):
+    songs = load_songs()
+    song = next((s for s in songs if s.id == song_id), None)
+    if not song:
+        raise HTTPException(404, "Song not found")
+    best = assign_best(song, load_beats())
+    if not best:
+        raise HTTPException(409, "No beats are available to allocate")
+    save_songs(songs)
+    return {"song": song, "assigned": best}
+
+@app.post("/songs/{song_id}/ready")
+def mark_ready(song_id: str):
+    songs = load_songs()
+    song = next((s for s in songs if s.id == song_id), None)
+    if not song:
+        raise HTTPException(404, "Song not found")
+    song.status = normalize_status("READY")
+    save_songs(songs)
+    return {"song": song}
+
+@app.get("/api/state")
+def state():
+    beats = load_beats()
+    songs = load_songs()
     return {
-        "lyrics_received": bool(lyrics.strip()),
-        "performance": perf_features,
-        "matches": results,
+        "template": PRODUCTION_TEMPLATE,
+        "beats": beats,
+        "songs": songs,
+        "grid": grid_payload(songs),
     }
