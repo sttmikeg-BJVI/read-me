@@ -71,6 +71,13 @@ audio{width:100%;height:34px}.matches{font-size:11px;margin-top:6px}.ok{color:#8
 </select>
 <input name="tags" placeholder="Tags / mood / energy">
 <textarea id="lyricsBox" name="lyrics" placeholder="Paste lyrics or song notes"></textarea>
+<div class="actions">
+<button type="button" id="startMic">Start Mic</button>
+<button type="button" id="stopMic" disabled>Stop Mic</button>
+</div>
+<div id="micStatus" class="small" role="status" aria-live="polite">Mic off.</div>
+<div id="micPreview" class="small muted" style="white-space:pre-wrap"></div>
+<div class="small muted">Say “new line”, “new paragraph”, “period”, or “comma”. Final text appends to your lyrics; live words appear above. Stop Mic before saving. Uses browser speech recognition; Chrome may need internet. No paid API.</div>
 <input id="lyricTextFile" type="file" accept=".txt,.md,text/plain">
 <textarea name="notes" placeholder="Production notes"></textarea>
 <input type="file" name="audio" accept="audio/*">
@@ -108,6 +115,77 @@ audio{width:100%;height:34px}.matches{font-size:11px;margin-top:6px}.ok{color:#8
 
 <script>
 const q=s=>document.querySelector(s);
+
+function spokenText(text){
+  const commands={"new paragraph":"\n\n","new line":"\n","period":".","full stop":".","comma":",","question mark":"?","exclamation mark":"!"};
+  return text.replace(/\b(new paragraph|new line|period|full stop|comma|question mark|exclamation mark)\b[.,!?]?/gi,m=>commands[m.replace(/[.,!?]$/,"").toLowerCase()])
+    .replace(/[ \t]*\n[ \t]*/g,"\n").replace(/[ \t]+([.,!?])/g,"$1").replace(/([.,!?])(?=[A-Za-z])/g,"$1 ").replace(/^[ \t]+|[ \t]+$/g,"");
+}
+function appendLyrics(text){
+  if(!text) return;
+  const box=q("#lyricsBox");
+  const gap=box.value && !/\s$/.test(box.value) && !/^[\n.,!?]/.test(text) ? " " : "";
+  box.value+=gap+text;
+  box.dispatchEvent(new Event("input",{bubbles:true}));
+  box.scrollTop=box.scrollHeight;
+}
+const SpeechAPI=window.SpeechRecognition||window.webkitSpeechRecognition;
+let micWanted=false, micRunning=false, micRecognition=null, micTimer=null, micError=false, micStartedAt=0;
+const micStart=q("#startMic"),micStop=q("#stopMic"),micStatus=q("#micStatus"),micPreview=q("#micPreview");
+function micButtons(){micStart.disabled=micWanted||micRunning;micStop.disabled=!micWanted&&!micRunning;}
+function stopLyricsMic(){
+  micWanted=false;clearTimeout(micTimer);
+  if(micRecognition&&micRunning){micStatus.textContent="Stopping — finishing transcript…";micRecognition.stop();}
+  else {micStatus.textContent="Mic stopped.";micButtons();}
+}
+function beginLyricsMic(){
+  if(!micWanted) return;
+  const recognition=new SpeechAPI();
+  micRecognition=recognition;
+  recognition.continuous=true;recognition.interimResults=true;recognition.lang="en-US";
+  const committed=new Set();
+  recognition.onstart=()=>{micRunning=true;micStartedAt=Date.now();micStatus.textContent="● Listening — read your lyrics.";micButtons();};
+  recognition.onresult=e=>{
+    if(micRecognition!==recognition) return;
+    let interim="";
+    for(let i=e.resultIndex;i<e.results.length;i++){
+      const result=e.results[i];
+      if(result.isFinal){if(!committed.has(i)){committed.add(i);appendLyrics(spokenText(result[0].transcript));}}
+      else interim+=result[0].transcript+" ";
+    }
+    micPreview.textContent=interim ? "Hearing: "+interim.trim() : "";
+  };
+  recognition.onerror=e=>{
+    if(e.error==="no-speech"){micStatus.textContent="No speech heard — waiting…";return;}
+    micWanted=false;micError=true;clearTimeout(micTimer);
+    const messages={"not-allowed":"Microphone blocked. Allow microphone access in Chrome, then press Start Mic.",
+      "service-not-allowed":"Speech recognition blocked by the browser. Check Chrome permissions.",
+      "audio-capture":"No microphone available. Check your microphone connection.",
+      "network":"Speech service unavailable. Check your internet connection, then press Start Mic."};
+    micStatus.textContent=messages[e.error]||"Mic stopped: "+e.error+". Press Start Mic to retry.";
+    micButtons();
+  };
+  recognition.onend=()=>{
+    if(micRecognition!==recognition) return;
+    micRunning=false;micPreview.textContent="";
+    if(micWanted){
+      if(Date.now()-micStartedAt<1000){micWanted=false;micStatus.textContent="Speech service ended. Press Start Mic to retry.";}
+      else {micStatus.textContent="Reconnecting microphone…";micTimer=setTimeout(beginLyricsMic,350);}
+    }else if(!micError) micStatus.textContent="Mic stopped. Final text is in your lyrics.";
+    micButtons();
+  };
+  try{micRunning=true;micStartedAt=Date.now();recognition.start();micButtons();}
+  catch(err){micRunning=false;micWanted=false;micStatus.textContent="Unable to start mic: "+err.message;micButtons();}
+}
+if(!SpeechAPI){
+  micStart.disabled=true;micStop.disabled=true;
+  micStatus.textContent="Dictation unavailable in this browser. Open the studio in Chrome.";
+}else{
+  micStart.addEventListener("click",()=>{micWanted=true;micError=false;micStatus.textContent="Requesting microphone…";beginLyricsMic();});
+  micStop.addEventListener("click",stopLyricsMic);
+}
+window.addEventListener("pagehide",()=>{micWanted=false;clearTimeout(micTimer);if(micRecognition)micRecognition.abort();});
+
 async function postForm(url, form){
   const r=await fetch(url,{method:"POST",body:new FormData(form)});
   const data=await r.json();
@@ -132,7 +210,7 @@ q("#bulkLyricsForm").addEventListener("submit",async e=>{
   }catch(err){q("#bulkLyricsMsg").textContent=err.message;}
 });
 q("#songForm").addEventListener("submit",async e=>{
-  e.preventDefault(); q("#songMsg").textContent="Saving...";
+  e.preventDefault(); if(micWanted||micRunning){q("#songMsg").textContent="Press Stop Mic and wait for the final transcript before saving.";return;} q("#songMsg").textContent="Saving...";
   try{await postForm("/songs",e.target);q("#songMsg").textContent="Song added.";e.target.reset();await load();}
   catch(err){q("#songMsg").textContent=err.message;}
 });
