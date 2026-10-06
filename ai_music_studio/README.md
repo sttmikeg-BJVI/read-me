@@ -73,7 +73,7 @@ Capture a flow to reuse phrase starts, lengths and push/pull on new words. Apply
 
 **Build writing context** produces structured context with the user's request, BPM, meter, section, subdivisions, phrase timing, stresses, density and last-word landing. This repository has no existing AI generation/rewrite provider or integration. AI-generated rewrites are not implemented; context preparation alone is not P4 acceptance.
 
-No online deployment configuration, authentication or existing production URL was present on this branch. Local runtime verification is not public deployment. Do not expose this unauthenticated upload server publicly without hosting, access control and persistent storage decisions.
+Render deployment configuration is available in render.music.yaml. A live deployment must still be created and verified.
 
 ## Verification
 
@@ -94,3 +94,13 @@ The integration test uploads real WAV bytes from a synthetic click fixture, crea
 - transcription adapter
 - persistent cloud media storage
 - richer harmonic/key compatibility scoring
+
+## Private Render deployment
+
+Use the dedicated render.music.yaml blueprint on this branch, in the music account. It requests a paid standard service and a 5 GB persistent disk; review current Render charges before creating it. No deployment or charges are initiated by committing this file. Automatic deploys are off. Python is pinned to 3.12.8.
+
+Set STUDIO_PASSWORD yourself in Render (at least 16 characters). STUDIO_OWNER_EMAIL is sttmikeg@gmail.com; Render generates STUDIO_SESSION_SECRET. Keep these values private. Cloud deployments fail closed if authentication configuration is missing. The sign-in cookie expires after seven days, is HTTP-only and secure over HTTPS. Sign out clears it.
+
+Uploaded files and song/beat metadata live under STUDIO_DATA_DIR on the persistent disk. Run one worker and one service instance: mutations are serialized within that process and JSON writes are atomic. Back up the disk/library separately; persistence is not a backup. /healthz is public and contains no library data.
+
+Local development remains open unless authentication environment variables or STUDIO_REQUIRE_AUTH=1 are set. Browser dictation remains browser-native; device support varies.

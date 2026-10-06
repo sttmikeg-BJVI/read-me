@@ -1,11 +1,13 @@
 from __future__ import annotations
 import json
+import os
+import tempfile
 from dataclasses import asdict
 from pathlib import Path
 from .models import BeatFeatures, SongRecord
 
 BASE = Path(__file__).resolve().parent
-DATA = BASE / "data"
+DATA = Path(os.getenv('STUDIO_DATA_DIR', str(BASE / 'data')))
 UPLOADS = DATA / "uploads"
 DB = DATA / "beats.json"
 SONG_DB = DATA / "songs.json"
@@ -30,11 +32,24 @@ def load_beats():
 
 def save_beats(beats):
     ensure_dirs()
-    DB.write_text(json.dumps([asdict(b) for b in beats], indent=2), encoding="utf-8")
+    _atomic_write(DB, [asdict(b) for b in beats])
 
 def load_songs():
     return [SongRecord(**r) for r in _load_rows(SONG_DB)]
 
 def save_songs(songs):
     ensure_dirs()
-    SONG_DB.write_text(json.dumps([asdict(s) for s in songs], indent=2), encoding="utf-8")
+    _atomic_write(SONG_DB, [asdict(s) for s in songs])
+
+def _atomic_write(path, rows):
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=path.parent, delete=False) as stream:
+            temporary = Path(stream.name)
+            json.dump(rows, stream, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary and temporary.exists():
+            temporary.unlink()

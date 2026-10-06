@@ -1,0 +1,30 @@
+# Separate single-instance Music Studio; does not change BJVI or Grieve services.
+# Review Render pricing before provisioning this paid plan or disk.
+services:
+  - type: web
+    name: sttmikeg-music-studio
+    runtime: python
+    branch: feature/ai-music-production-studio-mvp
+    plan: standard
+    numInstances: 1
+    buildCommand: pip install -r ai_music_studio/requirements.txt
+    startCommand: uvicorn ai_music_studio.app:app --host 0.0.0.0 --port $PORT --workers 1 --proxy-headers
+    healthCheckPath: /healthz
+    autoDeployTrigger: off
+    disk:
+      name: music-library
+      mountPath: /var/data/music-studio
+      sizeGB: 5
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: STUDIO_DATA_DIR
+        value: /var/data/music-studio
+      - key: STUDIO_REQUIRE_AUTH
+        value: "1"
+      - key: STUDIO_OWNER_EMAIL
+        value: sttmikeg@gmail.com
+      - key: STUDIO_PASSWORD
+        sync: false
+      - key: STUDIO_SESSION_SECRET
+        generateValue: true

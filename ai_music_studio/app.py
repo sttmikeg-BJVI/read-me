@@ -6,6 +6,8 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field, field_validator
 from typing import Literal
+import asyncio
+from .auth import install_auth
 from .analyzer import analyze_beat, analyze_performance
 from .organizer import (
     PRODUCTION_TEMPLATE,
@@ -18,6 +20,19 @@ from .organizer import (
 from .store import ensure_dirs, load_beats, load_songs, save_beats, save_songs, UPLOADS
 
 app = FastAPI(title="AI Music Production Studio")
+install_auth(app)
+write_lock = asyncio.Lock()
+
+@app.middleware('http')
+async def serialize_writes(request, call_next):
+    if request.method in {'POST', 'PUT', 'PATCH', 'DELETE'}:
+        async with write_lock:
+            return await call_next(request)
+    return await call_next(request)
+
+@app.get('/healthz', include_in_schema=False)
+def health():
+    return {'status': 'ok'}
 ensure_dirs()
 
 INDEX = r"""
@@ -45,6 +60,7 @@ audio{width:100%;height:34px}.matches{font-size:11px;margin-top:6px}.ok{color:#8
 </head>
 <body><main>
 <h1>AI Music Production Studio</h1>
+<form method="post" action="/logout"><button type="submit" style="width:auto;float:right">Sign out</button></form>
 <div class="muted">Upload beats + songs, analyze them, match them, and place them on the production grid.</div>
 
 <div class="forms">
