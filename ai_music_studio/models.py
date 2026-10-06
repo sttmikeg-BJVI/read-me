@@ -46,3 +46,4 @@ class SongRecord:
     assigned_beat_title: Optional[str] = None
     match_score: Optional[float] = None
     notes: str = ""
+    rhythm: dict = field(default_factory=dict)

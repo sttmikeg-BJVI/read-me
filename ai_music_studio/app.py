@@ -4,6 +4,8 @@ import uuid
 from pathlib import Path
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
+from pydantic import BaseModel, Field, field_validator
+from typing import Literal
 from .analyzer import analyze_beat, analyze_performance
 from .organizer import (
     PRODUCTION_TEMPLATE,
@@ -260,12 +262,101 @@ async function load(){
 }
 load();
 </script>
+<script src="/studio-assets/rhythm.js"></script>
+<script src="/studio-assets/pocket_ui.js"></script>
 </main></body></html>
 """
 
 @app.get("/", response_class=HTMLResponse)
 def home():
     return INDEX
+
+@app.get('/studio-assets/{name}')
+def studio_asset(name: str):
+    if name not in {'rhythm.js', 'pocket_ui.js'}:
+        raise HTTPException(404, 'Asset not found')
+    return FileResponse(Path(__file__).parent / name, media_type='text/javascript')
+
+class RhythmGrid(BaseModel):
+    bpm: float = Field(ge=20, le=400, allow_inf_nan=False)
+    bars: int = Field(ge=1, le=64)
+    meter: int = Field(ge=1, le=12)
+    denominator: Literal[2, 4, 8, 16]
+    subdivision: Literal[4, 8, 16, 32, 64]
+    offset: float = Field(ge=0, le=86400, allow_inf_nan=False)
+    section: str = Field(max_length=100)
+
+class RhythmWord(BaseModel):
+    text: str = Field(max_length=200)
+    syllables: int = Field(ge=1, le=20)
+    stress: bool = False
+
+class RhythmPhrase(BaseModel):
+    text: str = Field(max_length=10000)
+    start: float = Field(ge=-256, le=4096, allow_inf_nan=False)
+    duration: float = Field(gt=0, le=256, allow_inf_nan=False)
+    push: float = Field(ge=-64, le=64, allow_inf_nan=False)
+    intent: Literal['neutral', 'anticipation', 'laid-back', 'syncopated', 'double-time', 'half-time'] = 'neutral'
+    words: list[RhythmWord] = Field(max_length=500)
+
+class FlowPhrase(BaseModel):
+    start: float = Field(ge=-256, le=4096, allow_inf_nan=False)
+    duration: float = Field(gt=0, le=256, allow_inf_nan=False)
+    push: float = Field(ge=-64, le=64, allow_inf_nan=False)
+    syllables: list[int] = Field(max_length=500)
+    stress: list[bool] = Field(max_length=500)
+    intent: Literal['neutral', 'anticipation', 'laid-back', 'syncopated', 'double-time', 'half-time']
+
+    @field_validator('syllables')
+    @classmethod
+    def valid_counts(cls, values):
+        if any(n < 1 or n > 20 for n in values):
+            raise ValueError('Syllable counts must be 1–20')
+        return values
+
+class FlowPattern(BaseModel):
+    barLength: float = Field(gt=0, le=24, allow_inf_nan=False)
+    phrases: list[FlowPhrase] = Field(min_length=1, max_length=128)
+
+class RhythmProject(BaseModel):
+    beat_id: str = Field(max_length=64)
+    grid: RhythmGrid
+    phrases: list[RhythmPhrase] = Field(min_length=1, max_length=128)
+    pattern: FlowPattern | None = None
+
+class RhythmUpdate(BaseModel):
+    title: str = Field(min_length=1, max_length=500)
+    lyrics: str = Field(max_length=100000)
+    notes: str = Field(max_length=100000)
+    lane: str | None = Field(default=None, max_length=100)
+    tags: list[str] | None = Field(default=None, max_length=100)
+    rhythm: RhythmProject
+
+@app.put('/songs/{song_id}/rhythm')
+def save_rhythm(song_id: str, update: RhythmUpdate):
+    songs = load_songs()
+    song = next((s for s in songs if s.id == song_id), None)
+    if not song:
+        raise HTTPException(404, 'Song not found')
+    beat = next((b for b in load_beats() if b.id == update.rhythm.beat_id), None)
+    if not beat:
+        raise HTTPException(404, 'Beat not found')
+    if update.rhythm.grid.offset >= beat.duration:
+        raise HTTPException(400, 'Downbeat must be within the beat audio')
+    if '\n'.join(p.text for p in update.rhythm.phrases) != update.lyrics:
+        raise HTTPException(400, 'Phrase text must match the current lyrics')
+    song.title = update.title.strip()
+    if not song.title:
+        raise HTTPException(400, 'Song title required')
+    song.lyrics = update.lyrics
+    song.notes = update.notes
+    if update.lane is not None:
+        song.lane = normalize_lane(update.lane)
+    if update.tags is not None:
+        song.tags = [tag.strip()[:200] for tag in update.tags if tag.strip()]
+    song.rhythm = update.rhythm.model_dump()
+    save_songs(songs)
+    return {'song': song}
 
 def _audio_ext(filename: str | None):
     ext = Path(filename or "").suffix.lower()
