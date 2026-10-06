@@ -7,7 +7,7 @@ services:
     branch: feature/ai-music-production-studio-mvp
     plan: free
     numInstances: 1
-    buildCommand: pip install -r ai_music_studio/requirements.txt
+    buildCommand: pip install -r ai_music_studio/requirements.txt && python -m ai_music_studio.warmup
     startCommand: uvicorn ai_music_studio.app:app --host 0.0.0.0 --port $PORT --workers 1 --proxy-headers
     healthCheckPath: /healthz
     autoDeployTrigger: off

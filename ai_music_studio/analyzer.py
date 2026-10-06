@@ -1,6 +1,11 @@
 from __future__ import annotations
 import math
+import os
 from pathlib import Path
+# Limit thread memory on free Render compute. Compilation is warmed during build.
+if os.getenv('RENDER'):
+    os.environ.setdefault('NUMBA_NUM_THREADS', '1')
+    os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
 import numpy as np
 import librosa
 from .models import BeatFeatures, PerformanceFeatures

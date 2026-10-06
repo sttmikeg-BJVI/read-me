@@ -401,7 +401,7 @@ async def add_beat(
     beat_id = uuid.uuid4().hex[:12]
     target = UPLOADS / f"beat_{beat_id}{ext}"
     _copy_audio(file.file, target)
-    beat = analyze_beat(str(target), beat_id, title, [x.strip() for x in tags.split(",") if x.strip()])
+    beat = await asyncio.to_thread(analyze_beat, str(target), beat_id, title, [x.strip() for x in tags.split(",") if x.strip()])
     beat.path = cloud_storage.persist_audio(target)
     beats = load_beats()
     beats.append(beat)
@@ -424,7 +424,7 @@ async def add_beats_bulk(
         title = f"{title_prefix.strip()} {source_title}".strip() if title_prefix.strip() else source_title
         target = UPLOADS / f"beat_{beat_id}{ext}"
         _copy_audio(file.file, target)
-        beat = analyze_beat(str(target), beat_id, title, tag_list)
+        beat = await asyncio.to_thread(analyze_beat, str(target), beat_id, title, tag_list)
         beat.path = cloud_storage.persist_audio(target)
         beats.append(beat)
         added.append(beat)
@@ -465,7 +465,7 @@ async def add_song(
         ext = _audio_ext(audio.filename)
         target = UPLOADS / f"song_{song_id}{ext}"
         _copy_audio(audio.file, target)
-        perf = analyze_performance(str(target))
+        perf = await asyncio.to_thread(analyze_performance, str(target))
         song.audio_path = cloud_storage.persist_audio(target)
         song.duration = perf.duration
         song.estimated_bpm = perf.estimated_bpm
