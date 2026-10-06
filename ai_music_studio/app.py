@@ -1,5 +1,4 @@
 from __future__ import annotations
-import shutil
 import uuid
 from pathlib import Path
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
@@ -8,6 +7,7 @@ from pydantic import BaseModel, Field, field_validator
 from typing import Literal
 import asyncio
 from .auth import install_auth
+from . import cloud_storage
 from .analyzer import analyze_beat, analyze_performance
 from .organizer import (
     PRODUCTION_TEMPLATE,
@@ -380,6 +380,17 @@ def _audio_ext(filename: str | None):
         raise HTTPException(400, "Unsupported audio type")
     return ext
 
+def _copy_audio(source, target):
+    total = 0
+    with target.open('wb') as output:
+        while chunk := source.read(1024 * 1024):
+            total += len(chunk)
+            if cloud_storage.configured() and total > cloud_storage.MAX_AUDIO_BYTES:
+                output.close()
+                target.unlink(missing_ok=True)
+                raise HTTPException(413, 'Free storage supports audio files up to 50 MB. Upload a smaller copy.')
+            output.write(chunk)
+
 @app.post("/beats")
 async def add_beat(
     title: str = Form(...),
@@ -389,9 +400,9 @@ async def add_beat(
     ext = _audio_ext(file.filename)
     beat_id = uuid.uuid4().hex[:12]
     target = UPLOADS / f"beat_{beat_id}{ext}"
-    with target.open("wb") as out:
-        shutil.copyfileobj(file.file, out)
+    _copy_audio(file.file, target)
     beat = analyze_beat(str(target), beat_id, title, [x.strip() for x in tags.split(",") if x.strip()])
+    beat.path = cloud_storage.persist_audio(target)
     beats = load_beats()
     beats.append(beat)
     save_beats(beats)
@@ -412,9 +423,9 @@ async def add_beats_bulk(
         source_title = Path(file.filename or beat_id).stem
         title = f"{title_prefix.strip()} {source_title}".strip() if title_prefix.strip() else source_title
         target = UPLOADS / f"beat_{beat_id}{ext}"
-        with target.open("wb") as out:
-            shutil.copyfileobj(file.file, out)
+        _copy_audio(file.file, target)
         beat = analyze_beat(str(target), beat_id, title, tag_list)
+        beat.path = cloud_storage.persist_audio(target)
         beats.append(beat)
         added.append(beat)
     save_beats(beats)
@@ -429,7 +440,7 @@ def beat_audio(beat_id: str):
     beat = next((b for b in load_beats() if b.id == beat_id), None)
     if not beat:
         raise HTTPException(404, "Beat not found")
-    return FileResponse(beat.path)
+    return FileResponse(cloud_storage.restore_audio(beat.path, UPLOADS))
 
 @app.post("/songs")
 async def add_song(
@@ -453,10 +464,9 @@ async def add_song(
     if audio and audio.filename:
         ext = _audio_ext(audio.filename)
         target = UPLOADS / f"song_{song_id}{ext}"
-        with target.open("wb") as out:
-            shutil.copyfileobj(audio.file, out)
+        _copy_audio(audio.file, target)
         perf = analyze_performance(str(target))
-        song.audio_path = str(target)
+        song.audio_path = cloud_storage.persist_audio(target)
         song.duration = perf.duration
         song.estimated_bpm = perf.estimated_bpm
         song.energy = perf.energy
@@ -512,7 +522,7 @@ def song_audio(song_id: str):
     song = next((s for s in load_songs() if s.id == song_id), None)
     if not song or not song.audio_path:
         raise HTTPException(404, "Song audio not found")
-    return FileResponse(song.audio_path)
+    return FileResponse(cloud_storage.restore_audio(song.audio_path, UPLOADS))
 
 @app.post("/songs/{song_id}/match")
 def match_song(song_id: str):

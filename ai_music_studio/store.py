@@ -5,6 +5,7 @@ import tempfile
 from dataclasses import asdict
 from pathlib import Path
 from .models import BeatFeatures, SongRecord
+from . import cloud_storage
 
 BASE = Path(__file__).resolve().parent
 DATA = Path(os.getenv('STUDIO_DATA_DIR', str(BASE / 'data')))
@@ -21,6 +22,8 @@ def ensure_dirs():
 
 def _load_rows(path: Path):
     ensure_dirs()
+    if cloud_storage.configured():
+        return cloud_storage.load_rows(path.name)
     try:
         rows = json.loads(path.read_text(encoding="utf-8"))
         return rows if isinstance(rows, list) else []
@@ -32,14 +35,22 @@ def load_beats():
 
 def save_beats(beats):
     ensure_dirs()
-    _atomic_write(DB, [asdict(b) for b in beats])
+    rows = [asdict(b) for b in beats]
+    if cloud_storage.configured():
+        cloud_storage.save_rows(DB.name, rows)
+    else:
+        _atomic_write(DB, rows)
 
 def load_songs():
     return [SongRecord(**r) for r in _load_rows(SONG_DB)]
 
 def save_songs(songs):
     ensure_dirs()
-    _atomic_write(SONG_DB, [asdict(s) for s in songs])
+    rows = [asdict(s) for s in songs]
+    if cloud_storage.configured():
+        cloud_storage.save_rows(SONG_DB.name, rows)
+    else:
+        _atomic_write(SONG_DB, rows)
 
 def _atomic_write(path, rows):
     temporary = None

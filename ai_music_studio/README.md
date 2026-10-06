@@ -95,12 +95,14 @@ The integration test uploads real WAV bytes from a synthetic click fixture, crea
 - persistent cloud media storage
 - richer harmonic/key compatibility scoring
 
-## Private Render deployment
+## Free Render + private Supabase storage
 
-Use the dedicated render.music.yaml blueprint on this branch, in the music account. It requests a paid standard service and a 5 GB persistent disk; review current Render charges before creating it. No deployment or charges are initiated by committing this file. Automatic deploys are off. Python is pinned to 3.12.8.
+The dedicated render.music.yaml now uses Render free compute and no paid disk. Cloud audio and JSON song/beat records are saved in the private music-library bucket on Supabase. The local disk is only a temporary audio cache; stable supabase: references restore playback after a restart. Cloud errors fail saves visibly and never silently return an empty library.
 
-Set STUDIO_PASSWORD yourself in Render (at least 16 characters). STUDIO_OWNER_EMAIL is sttmikeg@gmail.com; Render generates STUDIO_SESSION_SECRET. Keep these values private. Cloud deployments fail closed if authentication configuration is missing. The sign-in cookie expires after seven days, is HTTP-only and secure over HTTPS. Sign out clears it.
+Set SUPABASE_SECRET_KEY only in Render server environment settings (new Supabase secret key or legacy service_role JWT). Never place it in HTML, GitHub or a message. Configure SUPABASE_URL and SUPABASE_STORAGE_BUCKET; STUDIO_REQUIRE_CLOUD_STORAGE=1 fails closed when missing. Set STUDIO_PASSWORD yourself (at least 16 characters), STUDIO_OWNER_EMAIL and STUDIO_SESSION_SECRET (at least 32 characters). Cloud access remains protected by private studio sign-in.
 
-Uploaded files and song/beat metadata live under STUDIO_DATA_DIR on the persistent disk. Run one worker and one service instance: mutations are serialized within that process and JSON writes are atomic. Back up the disk/library separately; persistence is not a backup. /healthz is public and contains no library data.
+Supabase free limits: 1 GB file storage, maximum 50 MB per file and limited transfer. Render free compute sleeps after inactivity and has 512 MB RAM. Audio analysis of long files may exceed free compute capacity; live validation is required before promising supported workloads. Use smaller compressed working copies and keep original masters separately. No paid upgrade is configured.
 
-Local development remains open unless authentication environment variables or STUDIO_REQUIRE_AUTH=1 are set. Browser dictation remains browser-native; device support varies.
+Use one worker and one service instance. JSON metadata is stored as two private objects; this is a single-owner library, not a distributed multi-server database. Reads fetch cloud metadata and writes are serialized in the app process. Audio is uploaded before metadata; a failed metadata save can leave an unused object that consumes storage. Existing local libraries are not automatically migrated. Back up your library and originals separately.
+
+The cloud storage tests use a simulated private service to check audio/metadata restoration after deleting the cache, upload limits, corrupted data and failed saves. They do not confirm access to the live Supabase project.
