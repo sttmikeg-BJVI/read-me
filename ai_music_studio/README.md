@@ -106,3 +106,19 @@ Supabase free limits: 1 GB file storage, maximum 50 MB per file and limited tran
 Use one worker and one service instance. JSON metadata is stored as two private objects; this is a single-owner library, not a distributed multi-server database. Reads fetch cloud metadata and writes are serialized in the app process. Audio is uploaded before metadata; a failed metadata save can leave an unused object that consumes storage. Existing local libraries are not automatically migrated. Back up your library and originals separately.
 
 The cloud storage tests use a simulated private service to check audio/metadata restoration after deleting the cache, upload limits, corrupted data and failed saves. They do not confirm access to the live Supabase project.
+
+## War Machine integration
+
+The existing **Write to the beat** workspace now calls a real server-side War Machine engine after a song + beat grid is saved. It does not replace the Studio UI or require a paid AI API.
+
+Defined operations currently wired:
+
+- **War Chest**: creative ammunition from the current lyric, including focus terms, sound-gravity neighborhoods, physical/metaphor pathways, cadence slots and hook paths. It does not silently write a finished song.
+- **Angel's Advocate**: preserves the artist's wording and recommends delivery/cadence strengthening moves; also returns a word-preserving timing alternative.
+- **Devil's Advocate**: pressure-tests dense, repeated or predictable mechanical moves and returns alternate strategies without overwriting the lyric.
+- **Alchemist — Mutate**: generates three intended-pocket alternatives (air, push/pull, final-word landing) while preserving every lyric word.
+- **Lab in the Booth**: reports intended grid timing separately from recorded-file measurements. Existing uploaded vocal/demo analysis has duration/BPM/energy/onset/pause measurements only; word-level recorded-vocal timing is explicitly **not measured**.
+
+Every engine run is saved on the song. The original lyric is captured in version history before engine alternatives are recorded. Applying an Alchemist timing variant changes the local intended grid only; the user must review/listen and press **Save song + grid** to make it current.
+
+No external writing provider is configured. Model-written lyric alternatives remain unavailable until a provider is explicitly approved and configured; the internal War Machine functions above are independent of that future dependency.
