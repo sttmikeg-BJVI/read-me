@@ -1,0 +1,34 @@
+# Separate single-instance Music Studio; does not change BJVI or Grieve services.
+# Free hosting with private Supabase storage; no Render persistent disk.
+services:
+  - type: web
+    name: sttmikeg-music-studio
+    runtime: python
+    branch: feature/ai-music-production-studio-mvp
+    plan: free
+    numInstances: 1
+    buildCommand: pip install -r ai_music_studio/requirements.txt && python -m ai_music_studio.warmup
+    startCommand: uvicorn ai_music_studio.app:app --host 0.0.0.0 --port $PORT --workers 1 --proxy-headers
+    healthCheckPath: /healthz
+    autoDeployTrigger: off
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: STUDIO_DATA_DIR
+        value: /tmp/music-studio
+      - key: STUDIO_REQUIRE_CLOUD_STORAGE
+        value: "1"
+      - key: SUPABASE_URL
+        value: https://nnrrmokzkqwefivkmlwj.supabase.co
+      - key: SUPABASE_STORAGE_BUCKET
+        value: music-library
+      - key: SUPABASE_SECRET_KEY
+        sync: false
+      - key: STUDIO_REQUIRE_AUTH
+        value: "1"
+      - key: STUDIO_OWNER_EMAIL
+        value: sttmikeg@gmail.com
+      - key: STUDIO_PASSWORD
+        sync: false
+      - key: STUDIO_SESSION_SECRET
+        generateValue: true

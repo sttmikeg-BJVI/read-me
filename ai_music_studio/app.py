@@ -1,0 +1,644 @@
+from __future__ import annotations
+import uuid
+from pathlib import Path
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.responses import FileResponse, HTMLResponse
+from pydantic import BaseModel, Field, field_validator
+from typing import Literal
+import asyncio
+from .auth import install_auth
+from . import cloud_storage
+from .analyzer import analyze_beat, analyze_performance
+from .organizer import (
+    PRODUCTION_TEMPLATE,
+    assign_best,
+    grid_payload,
+    normalize_lane,
+    normalize_status,
+    suggest_matches,
+)
+from .store import ensure_dirs, load_beats, load_songs, save_beats, save_songs, UPLOADS
+from .war_machine import record_version, run_engine, utc_now
+
+app = FastAPI(title="AI Music Production Studio")
+install_auth(app)
+write_lock = asyncio.Lock()
+
+@app.middleware('http')
+async def serialize_writes(request, call_next):
+    if request.method in {'POST', 'PUT', 'PATCH', 'DELETE'}:
+        async with write_lock:
+            return await call_next(request)
+    return await call_next(request)
+
+@app.get('/healthz', include_in_schema=False)
+def health():
+    return {'status': 'ok'}
+ensure_dirs()
+
+INDEX = r"""
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI Music Production Studio</title>
+<style>
+body{font-family:Arial,sans-serif;margin:0;background:#111;color:#eee}
+main{max-width:1400px;margin:auto;padding:20px}
+h1{margin:0 0 6px}.muted{color:#aaa}
+.panel{background:#1b1b1b;border:1px solid #333;border-radius:12px;padding:16px;margin:14px 0}
+.forms{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+input,textarea,select,button{width:100%;box-sizing:border-box;padding:9px;margin:5px 0;border-radius:7px;border:1px solid #444;background:#222;color:#eee}
+button{cursor:pointer;background:#333}.small{font-size:12px}.gridwrap{overflow-x:auto}
+table{border-collapse:separate;border-spacing:8px;min-width:1150px;width:100%}
+th{font-size:12px;color:#bbb;text-transform:uppercase}td{vertical-align:top;background:#171717;border:1px solid #333;border-radius:9px;padding:8px;min-width:190px}
+.lane{font-weight:bold;width:160px}.card{border:1px solid #444;background:#242424;border-radius:8px;padding:9px;margin:6px 0}
+.card strong{display:block}.meta{font-size:11px;color:#aaa;margin:4px 0}.actions{display:flex;gap:6px;flex-wrap:wrap}.actions button{width:auto;font-size:11px;padding:6px 8px}
+audio{width:100%;height:34px}.matches{font-size:11px;margin-top:6px}.ok{color:#8ed081}.err{color:#ff8b8b}
+@media(max-width:800px){.forms{grid-template-columns:1fr}}
+</style>
+</head>
+<body><main>
+<h1>AI Music Production Studio</h1>
+<form method="post" action="/logout"><button type="submit" style="width:auto;float:right">Sign out</button></form>
+<div class="muted">Upload beats + songs, analyze them, match them, and place them on the production grid.</div>
+
+<div class="forms">
+<section class="panel">
+<h2>Add Beat</h2>
+<form id="beatForm">
+<input name="title_prefix" placeholder="Optional title prefix">
+<input name="tags" placeholder="Tags: cinematic, street, romantic">
+<input type="file" name="files" accept="audio/*" multiple required>
+<button>Upload + Analyze Beat(s)</button>
+</form>
+<div id="beatMsg" class="small"></div>
+</section>
+
+<section class="panel">
+<h2>Add Song / Performance</h2>
+<form id="songForm">
+<input name="title" placeholder="Song title" required>
+<select name="lane">
+<option value="unassigned">Unassigned</option>
+<option value="club-women">Club — Women</option>
+<option value="romantic-women">Romantic — Women</option>
+<option value="club-open">Club — Men / Both (Jack)</option>
+<option value="street">Street</option>
+<option value="cinematic">Cinematic</option>
+</select>
+<input name="tags" placeholder="Tags / mood / energy">
+<textarea id="lyricsBox" name="lyrics" placeholder="Paste lyrics or song notes"></textarea>
+<div class="actions">
+<button type="button" id="startMic">Start Mic</button>
+<button type="button" id="stopMic" disabled>Stop Mic</button>
+</div>
+<div id="micStatus" class="small" role="status" aria-live="polite">Mic off.</div>
+<div id="micPreview" class="small muted" style="white-space:pre-wrap"></div>
+<div class="small muted">Say “new line”, “new paragraph”, “period”, or “comma”. Final text appends to your lyrics; live words appear above. Stop Mic before saving. Uses browser speech recognition; Chrome may need internet. No paid API.</div>
+<input id="lyricTextFile" type="file" accept=".txt,.md,text/plain">
+<textarea name="notes" placeholder="Production notes"></textarea>
+<input type="file" name="audio" accept="audio/*">
+<button>Save Song + Analyze Audio</button>
+</form>
+<hr style="border-color:#333;margin:14px 0">
+<h3>Bulk lyric import</h3>
+<form id="bulkLyricsForm">
+<select name="lane">
+<option value="unassigned">Unassigned</option>
+<option value="club-women">Club — Women</option>
+<option value="romantic-women">Romantic — Women</option>
+<option value="club-open">Club — Men / Both (Jack)</option>
+<option value="street">Street</option>
+<option value="cinematic">Cinematic</option>
+</select>
+<input name="tags" placeholder="Shared tags for imported lyrics">
+<input type="file" name="files" accept=".txt,.md,text/plain" multiple required>
+<button>Import Lyric Files</button>
+</form>
+<div id="bulkLyricsMsg" class="small"></div>
+<div id="songMsg" class="small"></div>
+</section>
+</div>
+
+<section class="panel">
+<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+<h2 style="margin-right:auto">Production Grid</h2>
+<input id="filter" style="max-width:280px" placeholder="Filter title, lane, status">
+<button id="refresh" style="width:auto">Refresh</button>
+</div>
+<div id="summary" class="small muted"></div>
+<div id="grid" class="gridwrap"></div>
+</section>
+
+<script>
+const q=s=>document.querySelector(s);
+
+function spokenText(text){
+  const commands={"new paragraph":"\n\n","new line":"\n","period":".","full stop":".","comma":",","question mark":"?","exclamation mark":"!"};
+  return text.replace(/\b(new paragraph|new line|period|full stop|comma|question mark|exclamation mark)\b[.,!?]?/gi,m=>commands[m.replace(/[.,!?]$/,"").toLowerCase()])
+    .replace(/[ \t]*\n[ \t]*/g,"\n").replace(/[ \t]+([.,!?])/g,"$1").replace(/([.,!?])(?=[A-Za-z])/g,"$1 ").replace(/^[ \t]+|[ \t]+$/g,"");
+}
+function appendLyrics(text){
+  if(!text) return;
+  const box=q("#lyricsBox");
+  const gap=box.value && !/\s$/.test(box.value) && !/^[\n.,!?]/.test(text) ? " " : "";
+  box.value+=gap+text;
+  box.dispatchEvent(new Event("input",{bubbles:true}));
+  box.scrollTop=box.scrollHeight;
+}
+const SpeechAPI=window.SpeechRecognition||window.webkitSpeechRecognition;
+let micWanted=false, micRunning=false, micRecognition=null, micTimer=null, micError=false, micStartedAt=0;
+const micStart=q("#startMic"),micStop=q("#stopMic"),micStatus=q("#micStatus"),micPreview=q("#micPreview");
+function micButtons(){micStart.disabled=micWanted||micRunning;micStop.disabled=!micWanted&&!micRunning;}
+function stopLyricsMic(){
+  micWanted=false;clearTimeout(micTimer);
+  if(micRecognition&&micRunning){micStatus.textContent="Stopping — finishing transcript…";micRecognition.stop();}
+  else {micStatus.textContent="Mic stopped.";micButtons();}
+}
+function beginLyricsMic(){
+  if(!micWanted) return;
+  const recognition=new SpeechAPI();
+  micRecognition=recognition;
+  recognition.continuous=true;recognition.interimResults=true;recognition.lang="en-US";
+  const committed=new Set();
+  recognition.onstart=()=>{micRunning=true;micStartedAt=Date.now();micStatus.textContent="● Listening — read your lyrics.";micButtons();};
+  recognition.onresult=e=>{
+    if(micRecognition!==recognition) return;
+    let interim="";
+    for(let i=e.resultIndex;i<e.results.length;i++){
+      const result=e.results[i];
+      if(result.isFinal){if(!committed.has(i)){committed.add(i);appendLyrics(spokenText(result[0].transcript));}}
+      else interim+=result[0].transcript+" ";
+    }
+    micPreview.textContent=interim ? "Hearing: "+interim.trim() : "";
+  };
+  recognition.onerror=e=>{
+    if(e.error==="no-speech"){micStatus.textContent="No speech heard — waiting…";return;}
+    micWanted=false;micError=true;clearTimeout(micTimer);
+    const messages={"not-allowed":"Microphone blocked. Allow microphone access in Chrome, then press Start Mic.",
+      "service-not-allowed":"Speech recognition blocked by the browser. Check Chrome permissions.",
+      "audio-capture":"No microphone available. Check your microphone connection.",
+      "network":"Speech service unavailable. Check your internet connection, then press Start Mic."};
+    micStatus.textContent=messages[e.error]||"Mic stopped: "+e.error+". Press Start Mic to retry.";
+    micButtons();
+  };
+  recognition.onend=()=>{
+    if(micRecognition!==recognition) return;
+    micRunning=false;micPreview.textContent="";
+    if(micWanted){
+      if(Date.now()-micStartedAt<1000){micWanted=false;micStatus.textContent="Speech service ended. Press Start Mic to retry.";}
+      else {micStatus.textContent="Reconnecting microphone…";micTimer=setTimeout(beginLyricsMic,350);}
+    }else if(!micError) micStatus.textContent="Mic stopped. Final text is in your lyrics.";
+    micButtons();
+  };
+  try{micRunning=true;micStartedAt=Date.now();recognition.start();micButtons();}
+  catch(err){micRunning=false;micWanted=false;micStatus.textContent="Unable to start mic: "+err.message;micButtons();}
+}
+if(!SpeechAPI){
+  micStart.disabled=true;micStop.disabled=true;
+  micStatus.textContent="Dictation unavailable in this browser. Open the studio in Chrome.";
+}else{
+  micStart.addEventListener("click",()=>{micWanted=true;micError=false;micStatus.textContent="Requesting microphone…";beginLyricsMic();});
+  micStop.addEventListener("click",stopLyricsMic);
+}
+window.addEventListener("pagehide",()=>{micWanted=false;clearTimeout(micTimer);if(micRecognition)micRecognition.abort();});
+
+async function postForm(url, form){
+  const r=await fetch(url,{method:"POST",body:new FormData(form)});
+  const data=await r.json();
+  if(!r.ok) throw new Error(data.detail||"Request failed");
+  return data;
+}
+q("#beatForm").addEventListener("submit",async e=>{
+  e.preventDefault(); q("#beatMsg").textContent="Analyzing...";
+  try{const out=await postForm("/beats/bulk",e.target);q("#beatMsg").textContent=out.added+" beat(s) added.";e.target.reset();await load();}
+  catch(err){q("#beatMsg").textContent=err.message;}
+});
+q("#lyricTextFile").addEventListener("change",async e=>{
+  const file=e.target.files[0];
+  if(file) q("#lyricsBox").value=await file.text();
+});
+q("#bulkLyricsForm").addEventListener("submit",async e=>{
+  e.preventDefault(); q("#bulkLyricsMsg").textContent="Importing...";
+  try{
+    const out=await postForm("/songs/bulk-lyrics",e.target);
+    q("#bulkLyricsMsg").textContent=out.added+" lyric file(s) imported.";
+    e.target.reset(); await load();
+  }catch(err){q("#bulkLyricsMsg").textContent=err.message;}
+});
+q("#songForm").addEventListener("submit",async e=>{
+  e.preventDefault(); if(micWanted||micRunning){q("#songMsg").textContent="Press Stop Mic and wait for the final transcript before saving.";return;} q("#songMsg").textContent="Saving...";
+  try{await postForm("/songs",e.target);q("#songMsg").textContent="Song added.";e.target.reset();await load();}
+  catch(err){q("#songMsg").textContent=err.message;}
+});
+q("#refresh").addEventListener("click",load);
+q("#filter").addEventListener("input",load);
+
+async function action(url){
+  const r=await fetch(url,{method:"POST"});
+  const data=await r.json();
+  if(!r.ok){alert(data.detail||"Action failed");return;}
+  await load();
+}
+async function showMatches(id){
+  const r=await fetch("/songs/"+id+"/match",{method:"POST"});
+  const data=await r.json();
+  if(!r.ok){alert(data.detail||"Match failed");return;}
+  const box=document.getElementById("m_"+id);
+  box.innerHTML=(data.matches||[]).slice(0,5).map(x=>"<div>"+x.score+" — "+esc(x.title)+" <button onclick=\"action('/songs/"+id+"/assign/"+x.beat_id+"')\" style='width:auto;padding:3px 6px'>Assign</button></div>").join("")||"No beats yet";
+}
+function esc(v){return String(v??"").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[m]));}
+function card(s){
+  const audio=s.audio_path?'<audio controls src="/songs/'+s.id+'/audio"></audio>':"";
+  const beat=s.assigned_beat_title?'<div class="meta">Beat: '+esc(s.assigned_beat_title)+' · '+(s.match_score??"")+"%</div>":"";
+  return '<div class="card"><strong>'+esc(s.title)+'</strong>'+
+    '<div class="meta">'+esc(s.lane)+' · '+esc(s.status)+(s.estimated_bpm?(" · "+s.estimated_bpm.toFixed(1)+" BPM"):"")+'</div>'+
+    beat+audio+
+    '<div class="actions"><button onclick="showMatches(\''+s.id+'\')">Match</button><button onclick="action(\'/songs/'+s.id+'/auto-allocate\')">Auto allocate</button><button onclick="action(\'/songs/'+s.id+'/ready\')">Mark ready</button></div>'+
+    '<div class="matches" id="m_'+s.id+'"></div></div>';
+}
+async function load(){
+  const r=await fetch("/api/state"); const data=await r.json();
+  const f=q("#filter").value.trim().toLowerCase();
+  const songs=(data.songs||[]).filter(s=>!f||[s.title,s.lane,s.status,s.assigned_beat_title].join(" ").toLowerCase().includes(f));
+  q("#summary").textContent=songs.length+" songs · "+(data.beats||[]).length+" beats";
+  const columns=data.template.columns;
+  const lanes=data.template.lanes;
+  let html="<table><thead><tr><th>Lane</th>"+columns.map(c=>"<th>"+c+"</th>").join("")+"</tr></thead><tbody>";
+  for(const lane of lanes){
+    html+="<tr><td class='lane'>"+esc(lane.label)+"</td>";
+    for(const status of columns){
+      const cell=songs.filter(s=>s.lane===lane.id&&s.status===status);
+      html+="<td>"+cell.map(card).join("")+"</td>";
+    }
+    html+="</tr>";
+  }
+  html+="</tbody></table>"; q("#grid").innerHTML=html;
+}
+load();
+</script>
+<script src="/studio-assets/rhythm.js"></script>
+<script src="/studio-assets/pocket_ui.js"></script>
+</main></body></html>
+"""
+
+@app.get("/", response_class=HTMLResponse)
+def home():
+    return INDEX
+
+@app.get('/studio-assets/{name}')
+def studio_asset(name: str):
+    if name not in {'rhythm.js', 'pocket_ui.js'}:
+        raise HTTPException(404, 'Asset not found')
+    return FileResponse(Path(__file__).parent / name, media_type='text/javascript')
+
+class RhythmGrid(BaseModel):
+    bpm: float = Field(ge=20, le=400, allow_inf_nan=False)
+    bars: int = Field(ge=1, le=64)
+    meter: int = Field(ge=1, le=12)
+    denominator: Literal[2, 4, 8, 16]
+    subdivision: Literal[4, 8, 16, 32, 64]
+    offset: float = Field(ge=0, le=86400, allow_inf_nan=False)
+    section: str = Field(max_length=100)
+
+class RhythmWord(BaseModel):
+    text: str = Field(max_length=200)
+    syllables: int = Field(ge=1, le=20)
+    stress: bool = False
+
+class RhythmPhrase(BaseModel):
+    text: str = Field(max_length=10000)
+    start: float = Field(ge=-256, le=4096, allow_inf_nan=False)
+    duration: float = Field(gt=0, le=256, allow_inf_nan=False)
+    push: float = Field(ge=-64, le=64, allow_inf_nan=False)
+    intent: Literal['neutral', 'anticipation', 'laid-back', 'syncopated', 'double-time', 'half-time'] = 'neutral'
+    words: list[RhythmWord] = Field(max_length=500)
+
+class FlowPhrase(BaseModel):
+    start: float = Field(ge=-256, le=4096, allow_inf_nan=False)
+    duration: float = Field(gt=0, le=256, allow_inf_nan=False)
+    push: float = Field(ge=-64, le=64, allow_inf_nan=False)
+    syllables: list[int] = Field(max_length=500)
+    stress: list[bool] = Field(max_length=500)
+    intent: Literal['neutral', 'anticipation', 'laid-back', 'syncopated', 'double-time', 'half-time']
+
+    @field_validator('syllables')
+    @classmethod
+    def valid_counts(cls, values):
+        if any(n < 1 or n > 20 for n in values):
+            raise ValueError('Syllable counts must be 1–20')
+        return values
+
+class FlowPattern(BaseModel):
+    barLength: float = Field(gt=0, le=24, allow_inf_nan=False)
+    phrases: list[FlowPhrase] = Field(min_length=1, max_length=128)
+
+class RhythmProject(BaseModel):
+    beat_id: str = Field(max_length=64)
+    grid: RhythmGrid
+    phrases: list[RhythmPhrase] = Field(min_length=1, max_length=128)
+    pattern: FlowPattern | None = None
+
+class RhythmUpdate(BaseModel):
+    title: str = Field(min_length=1, max_length=500)
+    lyrics: str = Field(max_length=100000)
+    notes: str = Field(max_length=100000)
+    lane: str | None = Field(default=None, max_length=100)
+    tags: list[str] | None = Field(default=None, max_length=100)
+    rhythm: RhythmProject
+
+@app.put('/songs/{song_id}/rhythm')
+def save_rhythm(song_id: str, update: RhythmUpdate):
+    songs = load_songs()
+    song = next((s for s in songs if s.id == song_id), None)
+    if not song:
+        raise HTTPException(404, 'Song not found')
+    beat = next((b for b in load_beats() if b.id == update.rhythm.beat_id), None)
+    if not beat:
+        raise HTTPException(404, 'Beat not found')
+    if update.rhythm.grid.offset >= beat.duration:
+        raise HTTPException(400, 'Downbeat must be within the beat audio')
+    if '\n'.join(p.text for p in update.rhythm.phrases) != update.lyrics:
+        raise HTTPException(400, 'Phrase text must match the current lyrics')
+    if not song.lyric_versions:
+        record_version(song, 'original', 'Original artist lyric')
+    song.title = update.title.strip()
+    if not song.title:
+        raise HTTPException(400, 'Song title required')
+    song.lyrics = update.lyrics
+    song.notes = update.notes
+    if update.lane is not None:
+        song.lane = normalize_lane(update.lane)
+    if update.tags is not None:
+        song.tags = [tag.strip()[:200] for tag in update.tags if tag.strip()]
+    song.rhythm = update.rhythm.model_dump()
+    record_version(song, 'user-save', 'Saved lyric + intended grid')
+    save_songs(songs)
+    return {'song': song}
+
+
+class WarMachineRequest(BaseModel):
+    operation: Literal['war_chest', 'angel', 'devil', 'mutate', 'lab']
+    request: str = Field(default='', max_length=4000)
+
+@app.post('/songs/{song_id}/war-machine')
+def war_machine(song_id: str, payload: WarMachineRequest):
+    songs = load_songs()
+    song = next((s for s in songs if s.id == song_id), None)
+    if not song:
+        raise HTTPException(404, 'Song not found')
+    if not song.rhythm or not song.rhythm.get('beat_id') or not song.rhythm.get('phrases'):
+        raise HTTPException(409, 'Save the song beat grid before running War Machine')
+    beat = next((b for b in load_beats() if b.id == song.rhythm.get('beat_id')), None)
+    if not beat:
+        raise HTTPException(404, 'Saved beat not found')
+    if not song.lyric_versions:
+        record_version(song, 'original', 'Original artist lyric')
+    run_id = uuid.uuid4().hex[:12]
+    try:
+        result = run_engine(song, beat, payload.operation, payload.request)
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from None
+    run_record = {
+        'id': run_id,
+        'created_at': utc_now(),
+        'operation': payload.operation,
+        'request': payload.request.strip(),
+        'result': result,
+    }
+    machine = dict(song.war_machine or {})
+    runs = list(machine.get('runs') or [])
+    runs.append(run_record)
+    machine['runs'] = runs[-50:]
+    machine['latest_run_id'] = run_id
+    song.war_machine = machine
+    if payload.operation == 'mutate':
+        for variant in result['result'].get('variants', []):
+            alternate = dict(song.rhythm)
+            alternate['phrases'] = variant['phrases']
+            record_version(
+                song,
+                'engine-timing-alternative',
+                variant['label'],
+                lyrics=song.lyrics,
+                rhythm=alternate,
+                source_run_id=run_id,
+            )
+    save_songs(songs)
+    return {'run_id': run_id, 'result': result, 'song': song}
+
+def _audio_ext(filename: str | None):
+    ext = Path(filename or "").suffix.lower()
+    if ext not in {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}:
+        raise HTTPException(400, "Unsupported audio type")
+    return ext
+
+def _copy_audio(source, target):
+    total = 0
+    with target.open('wb') as output:
+        while chunk := source.read(1024 * 1024):
+            total += len(chunk)
+            if cloud_storage.configured() and total > cloud_storage.MAX_AUDIO_BYTES:
+                output.close()
+                target.unlink(missing_ok=True)
+                raise HTTPException(413, 'Free storage supports audio files up to 50 MB. Upload a smaller copy.')
+            output.write(chunk)
+
+@app.post("/beats")
+async def add_beat(
+    title: str = Form(...),
+    tags: str = Form(""),
+    file: UploadFile = File(...),
+):
+    ext = _audio_ext(file.filename)
+    beat_id = uuid.uuid4().hex[:12]
+    target = UPLOADS / f"beat_{beat_id}{ext}"
+    _copy_audio(file.file, target)
+    beat = await asyncio.to_thread(analyze_beat, str(target), beat_id, title, [x.strip() for x in tags.split(",") if x.strip()])
+    beat.path = cloud_storage.persist_audio(target)
+    beats = load_beats()
+    beats.append(beat)
+    save_beats(beats)
+    return {"beat": beat}
+
+@app.post("/beats/bulk")
+async def add_beats_bulk(
+    title_prefix: str = Form(""),
+    tags: str = Form(""),
+    files: list[UploadFile] = File(...),
+):
+    beats = load_beats()
+    added = []
+    tag_list = [x.strip() for x in tags.split(",") if x.strip()]
+    for file in files:
+        ext = _audio_ext(file.filename)
+        beat_id = uuid.uuid4().hex[:12]
+        source_title = Path(file.filename or beat_id).stem
+        title = f"{title_prefix.strip()} {source_title}".strip() if title_prefix.strip() else source_title
+        target = UPLOADS / f"beat_{beat_id}{ext}"
+        _copy_audio(file.file, target)
+        beat = await asyncio.to_thread(analyze_beat, str(target), beat_id, title, tag_list)
+        beat.path = cloud_storage.persist_audio(target)
+        beats.append(beat)
+        added.append(beat)
+    save_beats(beats)
+    return {"added": len(added), "beats": added}
+
+@app.get("/beats")
+def beats():
+    return {"beats": load_beats()}
+
+@app.get("/beats/{beat_id}/audio")
+def beat_audio(beat_id: str):
+    beat = next((b for b in load_beats() if b.id == beat_id), None)
+    if not beat:
+        raise HTTPException(404, "Beat not found")
+    return FileResponse(cloud_storage.restore_audio(beat.path, UPLOADS))
+
+@app.post("/songs")
+async def add_song(
+    title: str = Form(...),
+    lane: str = Form("unassigned"),
+    tags: str = Form(""),
+    lyrics: str = Form(""),
+    notes: str = Form(""),
+    audio: UploadFile | None = File(None),
+):
+    from .models import SongRecord
+    song_id = uuid.uuid4().hex[:12]
+    song = SongRecord(
+        id=song_id,
+        title=title.strip(),
+        lyrics=lyrics,
+        lane=normalize_lane(lane),
+        tags=[x.strip() for x in tags.split(",") if x.strip()],
+        notes=notes,
+    )
+    if audio and audio.filename:
+        ext = _audio_ext(audio.filename)
+        target = UPLOADS / f"song_{song_id}{ext}"
+        _copy_audio(audio.file, target)
+        perf = await asyncio.to_thread(analyze_performance, str(target))
+        song.audio_path = cloud_storage.persist_audio(target)
+        song.duration = perf.duration
+        song.estimated_bpm = perf.estimated_bpm
+        song.energy = perf.energy
+        song.onset_density = perf.onset_density
+        song.pause_ratio = perf.pause_ratio
+        song.status = "ANALYZED"
+    songs = load_songs()
+    songs.append(song)
+    save_songs(songs)
+    return {"song": song}
+
+@app.post("/songs/bulk-lyrics")
+async def add_songs_from_lyrics(
+    lane: str = Form("unassigned"),
+    tags: str = Form(""),
+    files: list[UploadFile] = File(...),
+):
+    from .models import SongRecord
+    songs = load_songs()
+    added = []
+    tag_list = [x.strip() for x in tags.split(",") if x.strip()]
+    for file in files:
+        filename = file.filename or "Untitled"
+        ext = Path(filename).suffix.lower()
+        if ext not in {".txt", ".md"}:
+            raise HTTPException(400, f"Unsupported lyric file: {filename}")
+        raw = await file.read()
+        try:
+            lyrics = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            lyrics = raw.decode("utf-8", errors="replace")
+        title = Path(filename).stem
+        song = SongRecord(
+            id=uuid.uuid4().hex[:12],
+            title=title,
+            lyrics=lyrics,
+            lane=normalize_lane(lane),
+            tags=list(tag_list),
+            status="INBOX",
+            notes=f"Imported from {filename}",
+        )
+        songs.append(song)
+        added.append(song)
+    save_songs(songs)
+    return {"added": len(added), "songs": added}
+
+@app.get("/songs")
+def songs():
+    return {"songs": load_songs()}
+
+@app.get("/songs/{song_id}/audio")
+def song_audio(song_id: str):
+    song = next((s for s in load_songs() if s.id == song_id), None)
+    if not song or not song.audio_path:
+        raise HTTPException(404, "Song audio not found")
+    return FileResponse(cloud_storage.restore_audio(song.audio_path, UPLOADS))
+
+@app.post("/songs/{song_id}/match")
+def match_song(song_id: str):
+    songs = load_songs()
+    song = next((s for s in songs if s.id == song_id), None)
+    if not song:
+        raise HTTPException(404, "Song not found")
+    matches = suggest_matches(song, load_beats())
+    if matches and song.status not in {"ASSIGNED", "READY"}:
+        song.status = "MATCHED"
+        save_songs(songs)
+    return {"song_id": song_id, "matches": matches[:10]}
+
+@app.post("/songs/{song_id}/auto-allocate")
+def auto_allocate(song_id: str):
+    songs = load_songs()
+    song = next((s for s in songs if s.id == song_id), None)
+    if not song:
+        raise HTTPException(404, "Song not found")
+    best = assign_best(song, load_beats())
+    if not best:
+        raise HTTPException(409, "No beats are available to allocate")
+    save_songs(songs)
+    return {"song": song, "assigned": best}
+
+@app.post("/songs/{song_id}/assign/{beat_id}")
+def assign_specific(song_id: str, beat_id: str):
+    songs = load_songs()
+    song = next((s for s in songs if s.id == song_id), None)
+    if not song:
+        raise HTTPException(404, "Song not found")
+    beats = load_beats()
+    beat = next((b for b in beats if b.id == beat_id), None)
+    if not beat:
+        raise HTTPException(404, "Beat not found")
+    ranked = suggest_matches(song, beats)
+    scored = next((r for r in ranked if r.beat_id == beat_id), None)
+    song.assigned_beat_id = beat.id
+    song.assigned_beat_title = beat.title
+    song.match_score = scored.score if scored else None
+    song.status = "ASSIGNED"
+    save_songs(songs)
+    return {"song": song, "assigned_beat": beat}
+
+@app.post("/songs/{song_id}/ready")
+def mark_ready(song_id: str):
+    songs = load_songs()
+    song = next((s for s in songs if s.id == song_id), None)
+    if not song:
+        raise HTTPException(404, "Song not found")
+    song.status = normalize_status("READY")
+    save_songs(songs)
+    return {"song": song}
+
+@app.get("/api/state")
+def state():
+    beats = load_beats()
+    songs = load_songs()
+    return {
+        "template": PRODUCTION_TEMPLATE,
+        "beats": beats,
+        "songs": songs,
+        "grid": grid_payload(songs),
+    }
