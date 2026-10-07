@@ -47,3 +47,5 @@ class SongRecord:
     match_score: Optional[float] = None
     notes: str = ""
     rhythm: dict = field(default_factory=dict)
+    lyric_versions: list = field(default_factory=list)
+    war_machine: dict = field(default_factory=dict)
