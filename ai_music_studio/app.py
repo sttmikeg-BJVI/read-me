@@ -18,6 +18,7 @@ from .organizer import (
     suggest_matches,
 )
 from .store import ensure_dirs, load_beats, load_songs, save_beats, save_songs, UPLOADS
+from .war_machine import record_version, run_engine, utc_now
 
 app = FastAPI(title="AI Music Production Studio")
 install_auth(app)
@@ -361,6 +362,8 @@ def save_rhythm(song_id: str, update: RhythmUpdate):
         raise HTTPException(400, 'Downbeat must be within the beat audio')
     if '\n'.join(p.text for p in update.rhythm.phrases) != update.lyrics:
         raise HTTPException(400, 'Phrase text must match the current lyrics')
+    if not song.lyric_versions:
+        record_version(song, 'original', 'Original artist lyric')
     song.title = update.title.strip()
     if not song.title:
         raise HTTPException(400, 'Song title required')
@@ -371,8 +374,60 @@ def save_rhythm(song_id: str, update: RhythmUpdate):
     if update.tags is not None:
         song.tags = [tag.strip()[:200] for tag in update.tags if tag.strip()]
     song.rhythm = update.rhythm.model_dump()
+    record_version(song, 'user-save', 'Saved lyric + intended grid')
     save_songs(songs)
     return {'song': song}
+
+
+class WarMachineRequest(BaseModel):
+    operation: Literal['war_chest', 'angel', 'devil', 'mutate', 'lab']
+    request: str = Field(default='', max_length=4000)
+
+@app.post('/songs/{song_id}/war-machine')
+def war_machine(song_id: str, payload: WarMachineRequest):
+    songs = load_songs()
+    song = next((s for s in songs if s.id == song_id), None)
+    if not song:
+        raise HTTPException(404, 'Song not found')
+    if not song.rhythm or not song.rhythm.get('beat_id') or not song.rhythm.get('phrases'):
+        raise HTTPException(409, 'Save the song beat grid before running War Machine')
+    beat = next((b for b in load_beats() if b.id == song.rhythm.get('beat_id')), None)
+    if not beat:
+        raise HTTPException(404, 'Saved beat not found')
+    if not song.lyric_versions:
+        record_version(song, 'original', 'Original artist lyric')
+    run_id = uuid.uuid4().hex[:12]
+    try:
+        result = run_engine(song, beat, payload.operation, payload.request)
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from None
+    run_record = {
+        'id': run_id,
+        'created_at': utc_now(),
+        'operation': payload.operation,
+        'request': payload.request.strip(),
+        'result': result,
+    }
+    machine = dict(song.war_machine or {})
+    runs = list(machine.get('runs') or [])
+    runs.append(run_record)
+    machine['runs'] = runs[-50:]
+    machine['latest_run_id'] = run_id
+    song.war_machine = machine
+    if payload.operation == 'mutate':
+        for variant in result['result'].get('variants', []):
+            alternate = dict(song.rhythm)
+            alternate['phrases'] = variant['phrases']
+            record_version(
+                song,
+                'engine-timing-alternative',
+                variant['label'],
+                lyrics=song.lyrics,
+                rhythm=alternate,
+                source_run_id=run_id,
+            )
+    save_songs(songs)
+    return {'run_id': run_id, 'result': result, 'song': song}
 
 def _audio_ext(filename: str | None):
     ext = Path(filename or "").suffix.lower()
