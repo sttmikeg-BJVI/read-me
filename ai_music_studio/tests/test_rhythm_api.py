@@ -16,7 +16,7 @@ def setup_store(tmp_path, monkeypatch):
     store.ensure_dirs()
 
 def payload(beat_id):
-    return {'title': 'Pocket test', 'lyrics': 'Hold the light', 'notes': 'test', 'rhythm': {
+    return {'title': 'WAR MACHINE SAMPLE SONG', 'lyrics': 'Hold the light', 'notes': 'automated acceptance fixture', 'rhythm': {
         'beat_id': beat_id, 'grid': {'bpm': 120, 'bars': 4, 'meter': 4, 'denominator': 4,
             'subdivision': 16, 'offset': 0.1, 'section': 'verse'},
         'phrases': [{'text': 'Hold the light', 'start': 0, 'duration': 3.2, 'push': -0.125,
@@ -35,16 +35,27 @@ def test_real_audio_upload_song_grid_save_reopen(tmp_path, monkeypatch):
     sf.write(audio, y, sr)
     with TestClient(app) as client:
         with audio.open('rb') as f:
-            uploaded = client.post('/beats/bulk', files={'files': ('beat.wav', f, 'audio/wav')})
+            uploaded = client.post('/beats/bulk', data={'title_prefix': 'WAR MACHINE SAMPLE BEAT'}, files={'files': ('sample-beat.wav', f, 'audio/wav')})
         assert uploaded.status_code == 200, uploaded.text
         beat = uploaded.json()['beats'][0]
         assert 0 < beat['bpm'] < 400
         assert client.get(f"/beats/{beat['id']}/audio").status_code == 200
-        song = client.post('/songs', data={'title': 'Pocket test', 'lyrics': 'Hold the light'}).json()['song']
+        with audio.open('rb') as f:
+            song_response = client.post('/songs', data={'title': 'WAR MACHINE SAMPLE SONG', 'lyrics': 'Hold the light'}, files={'audio': ('sample-performance.wav', f, 'audio/wav')})
+        assert song_response.status_code == 200, song_response.text
+        song = song_response.json()['song']
+        assert client.get(f"/songs/{song['id']}/audio").status_code == 200
         data = payload(beat['id'])
         response = client.put(f"/songs/{song['id']}/rhythm", json=data)
         assert response.status_code == 200, response.text
+        engine = client.post(f"/songs/{song['id']}/war-machine", json={'operation': 'lab', 'request': 'verify intended pocket against available performance measurements'})
+        assert engine.status_code == 200, engine.text
+        lab = engine.json()['result']['result']
+        assert lab['recorded_vocal_measurements']['has_recorded_audio'] is True
+        assert lab['recorded_vocal_measurements']['word_level_timing_measured'] is False
         reopened = client.get('/api/state').json()['songs'][0]
+        assert reopened['title'] == 'WAR MACHINE SAMPLE SONG'
+        assert reopened['war_machine']['runs']
         assert reopened['rhythm'] == data['rhythm']
         assert reopened['lyrics'] == data['lyrics']
         assert store.load_songs()[0].rhythm == data['rhythm']
