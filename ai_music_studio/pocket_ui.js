@@ -1,6 +1,6 @@
 (()=>{
 const $=id=>document.getElementById(id),R=window.Rhythm;
-let songId=null,beatId=null,lines=[],pattern=null,beats=[],songs=[],dirty=false,frame;
+let songId=null,beatId=null,lines=[],pattern=null,beats=[],songs=[],dirty=false,frame,wmVariants=[];
 const section=document.createElement('section');section.className='panel';section.id='pocket';
 section.innerHTML=`<h2>Write to the beat</h2>
 <div class="actions"><select id="pocketSong" aria-label="Song project" style="width:auto"><option value="">Choose a saved song</option></select><button id="openPocket" type="button">Open song</button><button id="newPocket" type="button">New song</button></div>
@@ -14,7 +14,25 @@ section.innerHTML=`<h2>Write to the beat</h2>
 <div id="pPosition" role="status" class="small"></div><div id="pTimeline" style="overflow:auto;max-height:420px"></div>
 <details><summary>Edit phrase timing, syllables, stress and delivery</summary><div id="pPhrases"></div></details>
 <div id="pAnalysis" class="small"></div>
-<details><summary>Beat-aware writing context</summary><select id="pRequest"><option>Write to this beat</option><option>Keep the meaning but fix the flow</option><option>Make this bar less crowded</option><option>Match the cadence of the previous bar</option><option>Move the rhyme to the end of bar 4</option><option>Give this phrase more space</option><option>Make the delivery double-time</option><option>Make this section half-time</option><option>Keep the same pocket for the next 4 bars</option><option>Create a different pocket for the hook</option></select><button id="pContext" type="button">Build writing context</button><textarea id="pPrompt" readonly rows="8" aria-label="Beat-aware writing context"></textarea><p class="small muted">No AI writing provider is configured in this build. This context is ready for a writing model; it does not generate a rewrite.</p></details>
+<div class="card" id="warMachinePanel">
+<h3>War Machine</h3>
+<p class="small muted">Runs the project's defined internal engine against the saved lyric + beat grid. No paid AI provider is required. Originals stay preserved in version history.</p>
+<div class="actions">
+<select id="wmOperation" aria-label="War Machine operation" style="width:auto">
+<option value="war_chest">War Chest — creative ammunition</option>
+<option value="angel">Angel's Advocate — strengthen without replacing the thought</option>
+<option value="devil">Devil's Advocate — pressure-test the move</option>
+<option value="mutate">Alchemist — Mutate pocket/cadence</option>
+<option value="lab">Lab in the Booth — timing review</option>
+</select>
+<button id="wmRun" type="button">Run War Machine</button>
+</div>
+<textarea id="wmRequest" rows="2" placeholder="Optional direction, e.g. pressure-test the hook or give me a less crowded pocket"></textarea>
+<div id="wmStatus" class="small" role="status" aria-live="polite"></div>
+<div class="actions"><select id="wmVariant" style="width:auto" disabled><option value="">No timing variant selected</option></select><button id="wmApply" type="button" disabled>Apply timing variant</button></div>
+<pre id="wmOutput" class="small" style="white-space:pre-wrap;max-height:320px;overflow:auto;background:#141414;border:1px solid #333;border-radius:7px;padding:10px"></pre>
+</div>
+<details><summary>Beat-aware writing context</summary><select id="pRequest"><option>Write to this beat</option><option>Keep the meaning but fix the flow</option><option>Make this bar less crowded</option><option>Match the cadence of the previous bar</option><option>Move the rhyme to the end of bar 4</option><option>Give this phrase more space</option><option>Make the delivery double-time</option><option>Make this section half-time</option><option>Keep the same pocket for the next 4 bars</option><option>Create a different pocket for the hook</option></select><button id="pContext" type="button">Build writing context</button><textarea id="pPrompt" readonly rows="8" aria-label="Beat-aware writing context"></textarea><p class="small muted">The context export remains available for future model-backed writing. The War Machine controls above are real internal engine operations and do not depend on this export.</p></details>
 <div id="pMessage" role="status" aria-live="polite"></div>`;
 document.querySelector('.forms').after(section);
 function msg(text){$('pMessage').textContent=text;}
@@ -36,8 +54,8 @@ function redraw(){timeline();phraseEditor();}
 function safe(fn){return async()=>{try{await fn();}catch(e){msg(e.message);}};}
 $('pocketBeat').onchange=safe(()=>{selectBeat($('pocketBeat').value,true);dirty=true;redraw();});
 $('openPocket').onclick=safe(()=>{if(!$('stopMic').disabled)throw Error('Stop Mic before switching songs.');if(dirty&&!confirm('Discard unsaved grid edits and open another song?'))return;const song=songs.find(s=>s.id===$('pocketSong').value);if(!song)throw Error('Choose a saved song.');songId=song.id;const form=document.querySelector('#songForm');for(const k of ['title','lyrics','notes','lane','tags'])form.elements[k].value=k==='tags'?song.tags.join(', '):song[k]||'';
- const saved=song.rhythm;beatId=saved?.beat_id||song.assigned_beat_id;$('pocketBeat').value=beatId||'';selectBeat(beatId,!saved?.grid);if(saved?.grid)restore(saved.grid);lines=saved?.phrases||R.map(song.lyrics,grid());pattern=saved?.pattern||null;dirty=false;redraw();msg('Song opened.');});
-$('newPocket').onclick=safe(()=>{if(!$('stopMic').disabled)throw Error('Stop Mic before switching songs.');if(dirty&&!confirm('Discard unsaved edits?'))return;document.querySelector('#songForm').reset();songId=null;lines=[];pattern=null;dirty=false;$('pocketSong').value='';redraw();msg('New song — enter title and lyrics above.');});
+ const saved=song.rhythm;beatId=saved?.beat_id||song.assigned_beat_id;$('pocketBeat').value=beatId||'';selectBeat(beatId,!saved?.grid);if(saved?.grid)restore(saved.grid);lines=saved?.phrases||R.map(song.lyrics,grid());pattern=saved?.pattern||null;wmVariants=[];$('wmOutput').textContent='';$('wmStatus').textContent='';$('wmVariant').innerHTML='<option value="">No timing variant selected</option>';$('wmVariant').disabled=true;$('wmApply').disabled=true;dirty=false;redraw();msg('Song opened.');});
+$('newPocket').onclick=safe(()=>{if(!$('stopMic').disabled)throw Error('Stop Mic before switching songs.');if(dirty&&!confirm('Discard unsaved edits?'))return;document.querySelector('#songForm').reset();songId=null;lines=[];pattern=null;wmVariants=[];$('wmOutput').textContent='';$('wmStatus').textContent='';$('wmVariant').innerHTML='<option value="">No timing variant selected</option>';$('wmVariant').disabled=true;$('wmApply').disabled=true;dirty=false;$('pocketSong').value='';redraw();msg('New song — enter title and lyrics above.');});
 $('mapPocket').onclick=safe(()=>{lines=R.map($('lyricsBox').value,grid());dirty=true;redraw();msg('Mapped as one phrase per bar. Adjust timing and syllables to your delivery.');});
 $('alignNow').onclick=safe(()=>{$('pOffset').value=$('pocketAudio').currentTime.toFixed(3);dirty=true;redraw();});
 $('capturePocket').onclick=safe(()=>{if(!lines.length)throw Error('Map lyrics first.');pattern=R.capture(lines,grid());dirty=true;msg('Flow captured. Save the song to preserve it.');});
@@ -46,7 +64,33 @@ function transformTiming(factor,space){if(!lines.length)throw Error('Map lyrics 
 $('moreSpace').onclick=safe(()=>transformTiming(.8,true));
 $('doubleTime').onclick=safe(()=>transformTiming(.5,false));
 $('halfTime').onclick=safe(()=>transformTiming(2,false));
-$('pContext').onclick=safe(()=>{if(!lines.length||lines.map(l=>l.text).join('\n')!==$('lyricsBox').value)throw Error('Map the current lyrics first.');$('pPrompt').value=JSON.stringify(R.context($('lyricsBox').value,lines,grid(),$('pRequest').value),null,2);msg('Beat-aware writing context built. AI rewriting is not configured.');});
+$('pContext').onclick=safe(()=>{if(!lines.length||lines.map(l=>l.text).join('\n')!==$('lyricsBox').value)throw Error('Map the current lyrics first.');$('pPrompt').value=JSON.stringify(R.context($('lyricsBox').value,lines,grid(),$('pRequest').value),null,2);msg('Beat-aware writing context built.');});
+$('wmRun').onclick=safe(async()=>{
+ if(!songId)throw Error('Save the song + grid before running War Machine.');
+ if(dirty)throw Error('Save the current lyric + grid first so War Machine analyzes the version you see.');
+ $('wmStatus').textContent='Running '+$('wmOperation').selectedOptions[0].textContent+'…';
+ $('wmRun').disabled=true;
+ try{
+  const res=await fetch('/songs/'+songId+'/war-machine',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({operation:$('wmOperation').value,request:$('wmRequest').value})});
+  const out=await res.json();
+  if(!res.ok)throw Error(out.detail||'War Machine failed.');
+  $('wmOutput').textContent=JSON.stringify(out.result,null,2);
+  wmVariants=out.result?.result?.variants||[];
+  $('wmVariant').innerHTML=wmVariants.length?'<option value="">Choose a timing alternative</option>'+wmVariants.map(v=>`<option value="${v.id}">${esc(v.label)}</option>`).join(''):'<option value="">No timing alternative returned</option>';
+  $('wmVariant').disabled=!wmVariants.length;$('wmApply').disabled=true;
+  $('wmStatus').textContent='Complete · run '+out.run_id+' saved to this song.';
+  await refresh();
+ } finally {$('wmRun').disabled=false;}
+});
+$('wmVariant').onchange=()=>{$('wmApply').disabled=!$('wmVariant').value;};
+$('wmApply').onclick=safe(()=>{
+ const variant=wmVariants.find(v=>v.id===$('wmVariant').value);
+ if(!variant)throw Error('Choose a timing alternative.');
+ if(variant.lyrics!==$('lyricsBox').value)throw Error('This timing alternative belongs to a different lyric version.');
+ lines=JSON.parse(JSON.stringify(variant.phrases));
+ dirty=true;redraw();
+ msg('War Machine timing alternative applied locally. Original words are unchanged. Listen, adjust, then Save song + grid to keep it.');
+});
 $('pPhrases').onchange=e=>{const el=e.target;if(!el.dataset.field)return;try{const line=lines[+el.dataset.line],key=el.dataset.field;const target=el.dataset.word!==undefined?line.words[+el.dataset.word]:line;const v=key==='stress'?el.checked:key==='intent'?el.value:+el.value;if(typeof v==='number'&&(!Number.isFinite(v)||(key==='duration'&&v<=0)||(key==='syllables'&&(!Number.isInteger(v)||v<1||v>20))))throw Error('Invalid timing or syllable count.');target[key]=v;dirty=true;timeline();}catch(err){msg(err.message);phraseEditor();}};
 for(const id of ['pBpm','pBars','pMeter','pDenom','pSub','pOffset','pSection'])$(id).onchange=safe(()=>{dirty=true;redraw();});
 $('lyricsBox').addEventListener('input',()=>{dirty=true;if(lines.length)msg('Lyrics changed. Map the current lyrics before saving or building writing context.');});
